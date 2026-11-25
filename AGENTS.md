@@ -94,3 +94,4 @@ npm run build        # Verify production Vite bundle in ./dist
 - Work on a descriptive branch (`feat/...`, `fix/...`, `docs/...`), verify `npm test && npm run build`, open a Pull Request against `main` with a clear structured summary body, and squash-merge (`gh pr merge --squash --delete-branch`).
 - The repository is configured with `squash_merge_commit_title=PR_TITLE` and `squash_merge_commit_message=PR_BODY`, so writing a thorough PR description automatically records a clean changelog entry in `git log` on `main` and triggers `.github/workflows/deploy.yml` to publish to GitHub Pages.
 - Check open issues first when picking up new work: `gh issue list --state open`.
+- **Documentation Sync Requirement**: Whenever a PR changes features, architecture invariants, or milestone scope, update `AGENTS.md` and/or `docs/ROADMAP.md` in the **same PR** so future sessions always inherit accurate context.
