@@ -66,12 +66,17 @@ Read this file and [`docs/ROADMAP.md`](docs/ROADMAP.md) first before modifying t
    - Rapid consecutive character edits sharing a `coalesceKey` within `700ms` coalesce into a single Undo step; structural mutations and deletions never coalesce.
    - UI-only toggles (`activeTermId` tab switch, `collapsed` fold state) use `updateCurrentWithoutHistory` so folding cards does not pollute the Undo stack or touch `lastUpdated`.
 
-3. **Destructive Action Safety**:
+3. **What-If Simulator Sandbox Isolation (`src/App.jsx`)**:
+   - Entering What-If Simulator clones the current base state into an in-memory `sandboxState` (`structuredClone(baseState)`).
+   - While `sandboxState !== null`, **all** mutations (editing already-graded marks, filling blank marks, changing weights/units, or adding/deleting hypothetical courses) update **only** `sandboxState` — never calling `storageService.save()` and never pushing onto real Undo/Redo history.
+   - `computeSandboxDiff()` highlights modified rows against `baseState`, and exiting What-If sets `sandboxState = null` (with `<CourseCard key={...-sim|live} />` remounting cleanly) so 100% of saved values revert immediately.
+
+4. **Destructive Action Safety**:
    - Deleting a **Term** or **Course** must open `ConfirmDeleteModal`.
    - Deleting an **Assessment Row** uses inline 2-step confirmation (`×` → `Delete?`) inside `CourseCard.jsx`.
    - Every confirmed deletion pushes onto the Undo stack and surfaces an inline `Undo` action in the toast notification.
 
-4. **Pluggable Storage & Cloud Sync (`src/services/storage.js`)**:
+5. **Pluggable Storage & Cloud Sync (`src/services/storage.js`)**:
    - All state passes through `validateTrackerState()` before saving or importing, returning freshly cloned objects without mutating inputs.
    - Future remote sync (see Milestone 2 in [`docs/ROADMAP.md`](docs/ROADMAP.md)) plugs into `storageService.registerCloudAdapter(adapter)` without requiring UI component rewrites.
 

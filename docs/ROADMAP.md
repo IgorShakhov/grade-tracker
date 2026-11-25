@@ -33,6 +33,8 @@ This document tracks shipped milestones, upcoming features, and key technical de
   - Atomic `{ current, past, future }` history stack with toolbar **`↶ Undo`** / **`↷ Redo`** buttons, `Ctrl/Cmd+Z` & `Ctrl/Cmd+Shift+Z` shortcuts, and Undo button inside deletion toasts.
   - Modal confirmation (`ConfirmDeleteModal`) before deleting a Term or Course; inline 2-click `Delete?` confirmation before deleting an Assessment Row.
   - Structured GitHub Issue templates (`.github/ISSUE_TEMPLATE/`) for bug reports and feature requests.
+- **Full In-Memory What-If Sandbox Isolation (Issue #4 Fix)**:
+  - Upgraded What-If Simulator to clone `sandboxState` on entry so editing *any* field (including already-graded assessments, blank assessments, weights, units, or hypothetical courses) stays strictly in memory and reverts 100% cleanly on exit without touching `localStorage`.
 
 ---
 
