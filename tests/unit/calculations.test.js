@@ -661,7 +661,7 @@ describe('Pass/Fail, What-If Simulator Overlay & Multi-Term GPA', () => {
     expect(allPfAgg.gpaUnits).toBe(0);
   });
 
-  it('applies What-If simGrades ONLY to ungraded categories without overwriting real grades or mutating state', () => {
+  it('applies What-If simGrades to both graded and ungraded categories without mutating source state', () => {
     const state = createBenchmarkState();
     const eco101 = state.terms[0].courses[0];
 
@@ -674,17 +674,19 @@ describe('Pass/Fail, What-If Simulator Overlay & Multi-Term GPA', () => {
     const simStats = calculateCourseStats(eco101, simGrades);
     expect(simStats.hasSimulated).toBe(true);
     expect(simStats.categoryBreakdowns.find((c) => c.id === 'eco-2')).toMatchObject({
-      effectiveGrade: 63.5,
-      isSimulated: false,
+      effectiveGrade: 99,
+      isSimulated: true,
     });
     expect(simStats.categoryBreakdowns.find((c) => c.id === 'eco-3')).toMatchObject({
       effectiveGrade: 85,
       isSimulated: true,
     });
+    // Original course object remains completely untouched
+    expect(eco101.categories.find((c) => c.id === 'eco-2').grade).toBe(63.5);
     expect(eco101.categories.find((c) => c.id === 'eco-3').grade).toBeNull();
-    expect(formatPercent(simStats.overallGrade, 2)).toBe('82.19%');
-    expect(simStats.letter).toBe('A-');
-    expect(simStats.gpa).toBe(3.7);
+    expect(formatPercent(simStats.overallGrade, 2)).toBe('91.07%');
+    expect(simStats.letter).toBe('A+');
+    expect(simStats.gpa).toBe(4.0);
   });
 
   it('computes independent active Term GPA and cross-term Cumulative GPA across multiple terms', () => {

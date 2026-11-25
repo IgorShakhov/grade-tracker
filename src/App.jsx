@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { DEFAULT_GRADE_SCALE } from './domain/constants.js';
 import {
   createInitialState,
@@ -44,6 +44,71 @@ import {
 const MAX_HISTORY = 30;
 const COALESCE_WINDOW_MS = 700;
 
+/**
+ * Compares sandboxState against baseState to identify every modified/added
+ * assessment category and count total simulated changes.
+ */
+function computeSandboxDiff(baseState, sandboxState) {
+  if (!sandboxState || !baseState) {
+    return { modifiedCatIds: new Set(), changeCount: 0 };
+  }
+
+  const baseCourses = new Map();
+  const baseCats = new Map();
+  for (const term of baseState.terms || []) {
+    for (const course of term.courses || []) {
+      baseCourses.set(course.id, course);
+      for (const cat of course.categories || []) {
+        baseCats.set(cat.id, cat);
+      }
+    }
+  }
+
+  const modifiedCatIds = new Set();
+  let changeCount = 0;
+
+  const sandboxCourseIds = new Set();
+  const sandboxCatIds = new Set();
+
+  for (const term of sandboxState.terms || []) {
+    for (const course of term.courses || []) {
+      sandboxCourseIds.add(course.id);
+      const origCourse = baseCourses.get(course.id);
+      if (!origCourse) {
+        changeCount += 1;
+      } else if (
+        origCourse.units !== course.units ||
+        Boolean(origCourse.passFail) !== Boolean(course.passFail)
+      ) {
+        changeCount += 1;
+      }
+
+      for (const cat of course.categories || []) {
+        sandboxCatIds.add(cat.id);
+        const origCat = baseCats.get(cat.id);
+        if (
+          !origCat ||
+          origCat.grade !== cat.grade ||
+          origCat.weight !== cat.weight ||
+          origCat.name !== cat.name
+        ) {
+          modifiedCatIds.add(cat.id);
+          changeCount += 1;
+        }
+      }
+    }
+  }
+
+  for (const origCourseId of baseCourses.keys()) {
+    if (!sandboxCourseIds.has(origCourseId)) changeCount += 1;
+  }
+  for (const origCatId of baseCats.keys()) {
+    if (!sandboxCatIds.has(origCatId)) changeCount += 1;
+  }
+
+  return { modifiedCatIds, changeCount };
+}
+
 export default function App() {
   const [doc, setDoc] = useState(() => ({
     current: storageService.load(),
@@ -54,8 +119,8 @@ export default function App() {
   const lastCoalesceRef = useRef({ key: null, time: 0 });
 
   const [sharedState, setSharedState] = useState(null);
-  const [simMode, setSimMode] = useState(false);
-  const [simGrades, setSimGrades] = useState({});
+  // When non-null, What-If Simulator is active and isolates all edits in memory
+  const [sandboxState, setSandboxState] = useState(null);
   const [shareModalUrl, setShareModalUrl] = useState(null);
   const [showDataModal, setShowDataModal] = useState(false);
   const [showScaleModal, setShowScaleModal] = useState(false);
@@ -104,11 +169,36 @@ export default function App() {
     };
   }, [showToast]);
 
-  const readOnly = Boolean(sharedState);
-  const activeState = sharedState || state;
+  const isSharedReadOnly = Boolean(sharedState);
+  const simMode = sandboxState !== null;
+  // In What-If Sandbox mode, allow testing edits even on a shared snapshot (in memory only)
+  const readOnly = isSharedReadOnly && !simMode;
+  const baseState = sharedState || state;
+  const activeState = sandboxState || baseState;
+
+  const { modifiedCatIds: simModifiedCatIds, changeCount: simCount } = useMemo(
+    () => computeSandboxDiff(baseState, sandboxState),
+    [baseState, sandboxState],
+  );
+
+  const handleToggleSimMode = useCallback(() => {
+    setPendingDelete(null);
+    setSandboxState((prev) => (prev !== null ? null : structuredClone(baseState)));
+  }, [baseState]);
+
+  const handleResetSimulation = useCallback(() => {
+    setSandboxState(structuredClone(baseState));
+  }, [baseState]);
 
   const updateCurrentWithoutHistory = useCallback(
     (updater, { touchTimestamp = false } = {}) => {
+      if (simMode) {
+        setSandboxState((prev) => {
+          if (!prev) return prev;
+          return typeof updater === 'function' ? updater(prev) : updater;
+        });
+        return;
+      }
       setDoc((prev) => {
         const nextCurrent =
           typeof updater === 'function' ? updater(prev.current) : updater;
@@ -116,15 +206,24 @@ export default function App() {
         return { ...prev, current: saved };
       });
     },
-    [],
+    [simMode],
   );
 
   /**
-   * Commits a user mutation to localStorage and records an Undo snapshot.
-   * Rapid consecutive text edits with the same `coalesceKey` are grouped into one Undo step.
+   * Commits a user mutation.
+   * When What-If Simulator (`simMode`) is active, mutates ONLY in-memory `sandboxState`
+   * without touching saved `localStorage` state or Undo/Redo history.
    */
   const commitState = useCallback(
     (updater, { coalesceKey = null, touchTimestamp = true } = {}) => {
+      if (simMode) {
+        setSandboxState((prev) => {
+          if (!prev) return prev;
+          return typeof updater === 'function' ? updater(prev) : updater;
+        });
+        return;
+      }
+
       const now = Date.now();
       const shouldCoalesce =
         coalesceKey !== null &&
@@ -146,11 +245,11 @@ export default function App() {
         };
       });
     },
-    [],
+    [simMode],
   );
 
   const handleUndo = useCallback(() => {
-    if (readOnly) return;
+    if (isSharedReadOnly || simMode) return;
     lastCoalesceRef.current = { key: null, time: 0 };
     setDoc((prev) => {
       if (prev.past.length === 0) return prev;
@@ -163,10 +262,10 @@ export default function App() {
       };
     });
     showToast('Undid last change.');
-  }, [readOnly, showToast]);
+  }, [isSharedReadOnly, simMode, showToast]);
 
   const handleRedo = useCallback(() => {
-    if (readOnly) return;
+    if (isSharedReadOnly || simMode) return;
     lastCoalesceRef.current = { key: null, time: 0 };
     setDoc((prev) => {
       if (prev.future.length === 0) return prev;
@@ -179,11 +278,11 @@ export default function App() {
       };
     });
     showToast('Redid change.');
-  }, [readOnly, showToast]);
+  }, [isSharedReadOnly, simMode, showToast]);
 
   // Global keyboard shortcuts: Ctrl/Cmd+Z (Undo) and Ctrl/Cmd+Shift+Z or Ctrl+Y (Redo)
   useEffect(() => {
-    if (readOnly) return undefined;
+    if (isSharedReadOnly || simMode) return undefined;
     function onKeyDown(e) {
       if (!(e.metaKey || e.ctrlKey) || e.altKey) return;
       const tag = e.target?.tagName;
@@ -205,17 +304,14 @@ export default function App() {
     }
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [readOnly, doc.past.length, doc.future.length, handleUndo, handleRedo]);
+  }, [isSharedReadOnly, simMode, doc.past.length, doc.future.length, handleUndo, handleRedo]);
 
   const activeTerm =
     activeState.terms.find((t) => t.id === activeState.activeTermId) ||
     activeState.terms[0];
 
   const gradeScale = activeState.gradeScale || DEFAULT_GRADE_SCALE;
-  const stats = calculateAllStats(activeState, simMode ? simGrades : null);
-  const simCount = Object.values(simGrades).filter(
-    (v) => typeof v === 'number' && Number.isFinite(v),
-  ).length;
+  const stats = calculateAllStats(activeState, null);
 
   const allCoursesInTerm = activeTerm?.courses || [];
   const allCollapsed =
@@ -224,22 +320,28 @@ export default function App() {
   // --- Shared View Handlers ---
   function handleExitSharedView() {
     clearShareParamsFromCurrentUrl(window);
+    setSandboxState(null);
     setSharedState(null);
-    setSimGrades({});
   }
 
   function handleSaveSharedCopyLocally() {
     if (!sharedState) return;
-    commitState(sharedState);
+    setSandboxState(null);
+    const saved = storageService.save(sharedState, { touchTimestamp: true });
+    setDoc((prev) => ({
+      current: saved,
+      past: [...prev.past.slice(-(MAX_HISTORY - 1)), prev.current],
+      future: [],
+    }));
     clearShareParamsFromCurrentUrl(window);
     setSharedState(null);
     showToast('Saved shared courses into your local tracker.');
   }
 
-  // --- Share Link Generation ---
+  // --- Share Link Generation (always shares saved baseState, not temporary What-If) ---
   async function handleOpenShareModal() {
     try {
-      const token = await encodeShareSnapshot(activeState);
+      const token = await encodeShareSnapshot(baseState);
       const url = buildShareUrl(window.location.href, token);
       setShareModalUrl(url);
     } catch {
@@ -259,7 +361,7 @@ export default function App() {
 
   // --- Term Mutations ---
   function handleSelectTerm(termId) {
-    if (readOnly) {
+    if (isSharedReadOnly && !simMode) {
       setSharedState((prev) => ({ ...prev, activeTermId: termId }));
       return;
     }
@@ -294,7 +396,7 @@ export default function App() {
       title: `Delete "${term.name}"?`,
       message: `This will delete "${term.name}" and its ${count} course${
         count === 1 ? '' : 's'
-      }. You can still Undo right after.`,
+      }.${simMode ? ' (What-If sandbox only)' : ' You can still Undo right after.'}`,
       confirmLabel: 'Delete Term',
     });
   }
@@ -333,7 +435,7 @@ export default function App() {
     const keys = Object.keys(patch);
     const onlyUiState = keys.every((k) => k === 'collapsed');
 
-    if (readOnly && onlyUiState) {
+    if (isSharedReadOnly && !simMode && onlyUiState) {
       setSharedState((prev) => ({
         ...prev,
         terms: prev.terms.map((t) =>
@@ -398,7 +500,7 @@ export default function App() {
         course.title ? ` (${course.title})` : ''
       } and its ${catCount} assessment row${
         catCount === 1 ? '' : 's'
-      }. You can still Undo afterward.`,
+      }.${simMode ? ' (What-If sandbox only)' : ' You can still Undo afterward.'}`,
       confirmLabel: 'Delete Course',
     });
   }
@@ -421,7 +523,7 @@ export default function App() {
         };
       });
       setPendingDelete(null);
-      showToast(`Deleted term "${target?.name || 'Term'}".`, { showUndo: true });
+      showToast(`Deleted term "${target?.name || 'Term'}".`, { showUndo: !simMode });
     } else if (pendingDelete.kind === 'course') {
       const label = pendingDelete.code || 'Course';
       commitState((prev) => ({
@@ -436,13 +538,13 @@ export default function App() {
         ),
       }));
       setPendingDelete(null);
-      showToast(`Deleted course "${label}".`, { showUndo: true });
+      showToast(`Deleted course "${label}".`, { showUndo: !simMode });
     }
   }
 
   function handleToggleCollapseAll() {
     const targetCollapsed = !allCollapsed;
-    if (readOnly) {
+    if (isSharedReadOnly && !simMode) {
       setSharedState((prev) =>
         setAllCoursesCollapsed(prev, activeTerm.id, targetCollapsed),
       );
@@ -518,19 +620,7 @@ export default function App() {
             },
       ),
     }));
-    showToast(`Deleted "${catName}".`, { showUndo: true });
-  }
-
-  function handleUpdateSimGrade(catId, value) {
-    setSimGrades((prev) => {
-      const next = { ...prev };
-      if (value === null || value === undefined) {
-        delete next[catId];
-      } else {
-        next[catId] = value;
-      }
-      return next;
-    });
+    showToast(`Deleted "${catName}".`, { showUndo: !simMode });
   }
 
   const allExistingCourses = activeState.terms.flatMap((t) => t.courses);
@@ -538,13 +628,13 @@ export default function App() {
   return (
     <div className="app-root">
       {/* Shared Read-Only Banner */}
-      {readOnly && (
+      {isSharedReadOnly && (
         <div className="mode-banner" role="status">
           <div className="mode-banner-inner">
             <span>
               Viewing a <strong>Read-Only Shared Snapshot</strong> (
-              {activeState.studentName || 'Shared'}). Edits are disabled unless you
-              save a copy.
+              {baseState.studentName || 'Shared'}). Edits are disabled unless you
+              save a copy or turn on What-If Simulator.
             </span>
             <div className="mode-banner-actions">
               <button
@@ -573,9 +663,9 @@ export default function App() {
         <div className="mode-banner sim-banner" role="status">
           <div className="mode-banner-inner">
             <span>
-              <strong>What-If Exam Simulator ON</strong> — Enter hypothetical grades
-              in dashed ungraded boxes to preview final course &amp; GPA outcomes.
-              Your real saved marks remain untouched.
+              <strong>What-If Exam Simulator ON</strong> — Edit any grade, weight,
+              or course to test outcomes. Nothing is saved; exiting restores all
+              values.
             </span>
             <div className="mode-banner-actions">
               {simCount > 0 && (
@@ -583,15 +673,16 @@ export default function App() {
                   id="clear-sim-btn"
                   type="button"
                   className="btn btn-ghost-light"
-                  onClick={() => setSimGrades({})}
+                  onClick={handleResetSimulation}
                 >
-                  Clear Hypothetical Marks ({simCount})
+                  Reset Simulation ({simCount})
                 </button>
               )}
               <button
+                id="exit-sim-btn"
                 type="button"
                 className="btn btn-ghost-light"
-                onClick={() => setSimMode(false)}
+                onClick={handleToggleSimMode}
               >
                 Exit Simulator
               </button>
@@ -609,8 +700,8 @@ export default function App() {
         stats={stats}
         hasMultipleTerms={activeState.terms.length > 1}
         activeTermName={activeTerm?.name || 'Term'}
-        canUndo={doc.past.length > 0}
-        canRedo={doc.future.length > 0}
+        canUndo={!simMode && doc.past.length > 0}
+        canRedo={!simMode && doc.future.length > 0}
         onUndo={handleUndo}
         onRedo={handleRedo}
         onChangeName={(name) =>
@@ -619,7 +710,7 @@ export default function App() {
             { coalesceKey: 'owner-name' },
           )
         }
-        onToggleSimMode={() => setSimMode((v) => !v)}
+        onToggleSimMode={handleToggleSimMode}
         onOpenShare={handleOpenShareModal}
         onOpenData={() => setShowDataModal(true)}
       />
@@ -642,7 +733,7 @@ export default function App() {
           <div className="courses-column">
             {allCoursesInTerm.map((course, idx) => (
               <CourseCard
-                key={course.id}
+                key={`${course.id}-${simMode ? 'sim' : 'live'}`}
                 course={course}
                 courseIndex={idx}
                 totalCourses={allCoursesInTerm.length}
@@ -651,7 +742,7 @@ export default function App() {
                 gradeScale={gradeScale}
                 readOnly={readOnly}
                 simMode={simMode}
-                simGrades={simGrades}
+                simModifiedCatIds={simModifiedCatIds}
                 isDragging={dragIndex === idx}
                 isDragOver={dragOverIndex === idx && dragIndex !== idx}
                 onDragStart={() => setDragIndex(idx)}
@@ -713,7 +804,6 @@ export default function App() {
                 onDeleteCategory={(catId, catName) =>
                   handleDeleteCategory(course.id, catId, catName)
                 }
-                onUpdateSimGrade={handleUpdateSimGrade}
               />
             ))}
 
@@ -781,26 +871,41 @@ export default function App() {
 
       {showDataModal && (
         <DataModal
-          readOnly={readOnly}
+          readOnly={isSharedReadOnly}
           onClose={() => setShowDataModal(false)}
-          onExportJson={() => exportStateAsJson(activeState)}
-          onExportCsv={() => exportStateAsCsv(activeState)}
+          onExportJson={() => exportStateAsJson(baseState)}
+          onExportCsv={() => exportStateAsCsv(baseState)}
           onImportJsonFile={(text) => {
             const imported = parseImportedJson(text);
-            commitState(imported, { touchTimestamp: false });
-            setSimGrades({});
+            setSandboxState(null);
+            const saved = storageService.save(imported, { touchTimestamp: false });
+            setDoc((prev) => ({
+              current: saved,
+              past: [...prev.past.slice(-(MAX_HISTORY - 1)), prev.current],
+              future: [],
+            }));
             showToast('Imported JSON tracker data.');
           }}
           onLoadSample={() => {
             const sample = createInitialState();
-            commitState(sample);
-            setSimGrades({});
+            setSandboxState(null);
+            const saved = storageService.save(sample, { touchTimestamp: true });
+            setDoc((prev) => ({
+              current: saved,
+              past: [...prev.past.slice(-(MAX_HISTORY - 1)), prev.current],
+              future: [],
+            }));
             showToast('Loaded sample courses.');
           }}
           onResetEmpty={() => {
             const empty = createEmptyState();
-            commitState(empty);
-            setSimGrades({});
+            setSandboxState(null);
+            const saved = storageService.save(empty, { touchTimestamp: true });
+            setDoc((prev) => ({
+              current: saved,
+              past: [...prev.past.slice(-(MAX_HISTORY - 1)), prev.current],
+              future: [],
+            }));
             showToast('Started fresh blank tracker.');
           }}
         />
@@ -812,7 +917,11 @@ export default function App() {
           onClose={() => setShowScaleModal(false)}
           onSaveScale={(nextScale) => {
             commitState((prev) => ({ ...prev, gradeScale: nextScale }));
-            showToast('Updated grading scale.');
+            showToast(
+              simMode
+                ? 'Updated grading scale in What-If sandbox.'
+                : 'Updated grading scale.',
+            );
           }}
         />
       )}
@@ -830,7 +939,7 @@ export default function App() {
       {toast && (
         <div className="toast" role="status" aria-live="polite">
           <span>{toast.text}</span>
-          {toast.showUndo && doc.past.length > 0 && (
+          {toast.showUndo && !simMode && doc.past.length > 0 && (
             <button
               type="button"
               className="toast-undo-btn"

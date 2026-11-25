@@ -94,7 +94,7 @@ export default function CourseCard({
   gradeScale,
   readOnly,
   simMode,
-  simGrades,
+  simModifiedCatIds,
   isDragging,
   isDragOver,
   onDragStart,
@@ -110,7 +110,6 @@ export default function CourseCard({
   onUpdateCategory,
   onReorderCategory,
   onDeleteCategory,
-  onUpdateSimGrade,
 }) {
   const [confirmingCatId, setConfirmingCatId] = useState(null);
 
@@ -120,13 +119,9 @@ export default function CourseCard({
     return () => clearTimeout(timer);
   }, [confirmingCatId]);
 
-  const stats = calculateCourseStats(course, simMode ? simGrades : null, gradeScale);
+  const stats = calculateCourseStats(course, null, gradeScale);
   const targetPct = typeof course.targetPct === 'number' ? course.targetPct : 85;
-  const targetInfo = calculateTargetRequirement(
-    course,
-    targetPct,
-    simMode ? simGrades : null,
-  );
+  const targetInfo = calculateTargetRequirement(course, targetPct, null);
 
   const isCollapsed = Boolean(course.collapsed);
   const isPassFail = Boolean(course.passFail ?? course.creditNoCredit);
@@ -319,19 +314,15 @@ export default function CourseCard({
               </thead>
               <tbody>
                 {stats.categoryBreakdowns.map((cat, idx) => {
-                  const hasRealGrade =
-                    typeof cat.grade === 'number' && Number.isFinite(cat.grade);
-                  const canSimulate = simMode && !hasRealGrade;
-                  const displayedGrade = hasRealGrade
-                    ? cat.grade
-                    : canSimulate
-                      ? (simGrades?.[cat.id] ?? null)
-                      : null;
+                  const isRowSimulated =
+                    simMode && Boolean(simModifiedCatIds?.has(cat.id));
+                  const isBlankInSim =
+                    simMode && (cat.grade === null || cat.grade === undefined);
 
                   return (
                     <tr
                       key={cat.id}
-                      className={cat.isSimulated ? 'row-simulated' : ''}
+                      className={isRowSimulated ? 'row-simulated' : ''}
                     >
                       {!readOnly && (
                         <td>
@@ -388,15 +379,13 @@ export default function CourseCard({
 
                       <td>
                         <NumericCellInput
-                          value={displayedGrade}
-                          placeholder={canSimulate ? 'What-if %' : '—'}
-                          disabled={readOnly && !simMode}
-                          isSimInput={canSimulate}
+                          value={cat.grade}
+                          placeholder={simMode ? 'What-if %' : '—'}
+                          disabled={readOnly}
+                          isSimInput={isRowSimulated || isBlankInSim}
                           ariaLabel={`${course.code} ${cat.name} grade percent`}
                           onCommit={(val) => {
-                            if (canSimulate) {
-                              onUpdateSimGrade(cat.id, val);
-                            } else if (!readOnly) {
+                            if (!readOnly) {
                               onUpdateCategory(cat.id, { grade: val });
                             }
                           }}

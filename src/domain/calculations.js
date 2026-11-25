@@ -216,12 +216,17 @@ function computeCategoryTotals(course, simGrades = null) {
     rawTotalWeight += w;
 
     const hasRealGrade = typeof cat?.grade === 'number' && Number.isFinite(cat.grade);
-    const simVal = simGrades && cat && Object.prototype.hasOwnProperty.call(simGrades, cat.id)
-      ? simGrades[cat.id]
-      : null;
-    const hasSimGrade = !hasRealGrade && typeof simVal === 'number' && Number.isFinite(simVal);
+    const hasSimOverride = Boolean(
+      simGrades && cat && Object.prototype.hasOwnProperty.call(simGrades, cat.id),
+    );
+    const simVal = hasSimOverride ? simGrades[cat.id] : undefined;
+    const simCleared = hasSimOverride && simVal === null;
+    const hasValidSimNum = hasSimOverride && typeof simVal === 'number' && Number.isFinite(simVal);
+    const hasSimGrade = hasValidSimNum || (simCleared && hasRealGrade);
 
-    const rawEffective = hasRealGrade ? cat.grade : (hasSimGrade ? simVal : null);
+    const rawEffective = hasValidSimNum
+      ? simVal
+      : (simCleared ? null : (hasRealGrade ? cat.grade : null));
     const effectiveGrade = rawEffective === 0 ? 0 : rawEffective;
     let contribution = null;
 

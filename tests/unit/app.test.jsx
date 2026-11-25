@@ -115,4 +115,46 @@ describe('Grade Tracker React Application (M1 + M1.1 + Undo/Redo & Confirmations
     fireEvent.click(screen.getByRole('button', { name: /↶ Undo/i }));
     expect(within(table).getAllByRole('row').length).toBe(rowsBefore);
   });
+
+  it('isolates ALL What-If edits (both already-graded and ungraded rows) in memory and reverts 100% on exit (Issue #4)', () => {
+    render(<App />);
+    const savedBefore = window.localStorage.getItem('grade_tracker_v1');
+
+    // Grab ECON101's already-graded first row and ungraded Final Exam row before entering What-If
+    const ecoBefore = screen.getByRole('region', { name: 'Course ECON101' });
+    const firstGradeBefore = within(ecoBefore).getAllByLabelText(/ECON101 .* grade percent/i)[0].value;
+    expect(firstGradeBefore).not.toBe('');
+
+    // Enter What-If Simulator
+    fireEvent.click(screen.getByRole('button', { name: /What-If Simulator/i }));
+    expect(screen.getByText(/What-If Exam Simulator ON/i)).toBeInTheDocument();
+
+    const ecoSim = screen.getByRole('region', { name: 'Course ECON101' });
+    const simGradeInputs = within(ecoSim).getAllByLabelText(/ECON101 .* grade percent/i);
+    const gradedInput = simGradeInputs[0];
+    const blankInput = simGradeInputs.find((el) => el.value === '');
+
+    // Change BOTH an already-graded assessment AND a blank ungraded assessment
+    fireEvent.focus(gradedInput);
+    fireEvent.change(gradedInput, { target: { value: '12.50' } });
+    fireEvent.blur(gradedInput);
+
+    fireEvent.focus(blankInput);
+    fireEvent.change(blankInput, { target: { value: '98.00' } });
+    fireEvent.blur(blankInput);
+
+    expect(screen.getByRole('button', { name: /Reset Simulation \(2\)/i })).toBeInTheDocument();
+    // Saved localStorage must remain completely untouched while simulating
+    expect(window.localStorage.getItem('grade_tracker_v1')).toBe(savedBefore);
+
+    // Exit What-If Simulator -> ALL values must snap back to original saved state
+    fireEvent.click(screen.getByRole('button', { name: /Exit Simulator/i }));
+    expect(screen.queryByText(/What-If Exam Simulator ON/i)).not.toBeInTheDocument();
+
+    const ecoAfter = screen.getByRole('region', { name: 'Course ECON101' });
+    const afterInputs = within(ecoAfter).getAllByLabelText(/ECON101 .* grade percent/i);
+    expect(afterInputs[0].value).toBe(firstGradeBefore);
+    expect(afterInputs.some((el) => el.value === '12.50' || el.value === '98.00')).toBe(false);
+    expect(window.localStorage.getItem('grade_tracker_v1')).toBe(savedBefore);
+  });
 });
