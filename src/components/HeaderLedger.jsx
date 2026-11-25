@@ -9,6 +9,10 @@ export default function HeaderLedger({
   stats,
   hasMultipleTerms,
   activeTermName,
+  canUndo,
+  canRedo,
+  onUndo,
+  onRedo,
   onChangeName,
   onToggleSimMode,
   onOpenShare,
@@ -54,6 +58,31 @@ export default function HeaderLedger({
           </div>
 
           <div className="toolbar-actions">
+            {!readOnly && (
+              <div className="undo-redo-group" role="group" aria-label="History controls">
+                <button
+                  id="undo-btn"
+                  type="button"
+                  className="btn btn-sm"
+                  disabled={!canUndo}
+                  onClick={onUndo}
+                  title="Undo last change (Ctrl/Cmd+Z)"
+                >
+                  ↶ Undo
+                </button>
+                <button
+                  id="redo-btn"
+                  type="button"
+                  className="btn btn-sm"
+                  disabled={!canRedo}
+                  onClick={onRedo}
+                  title="Redo change (Ctrl/Cmd+Shift+Z)"
+                >
+                  ↷ Redo
+                </button>
+              </div>
+            )}
+
             <button
               id="toggle-sim-btn"
               type="button"

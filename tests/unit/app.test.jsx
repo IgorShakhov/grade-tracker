@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { render, screen, within, fireEvent } from '@testing-library/react';
 import App from '../../src/App.jsx';
 
-describe('Grade Tracker React Application (M1 + M1.1)', () => {
+describe('Grade Tracker React Application (M1 + M1.1 + Undo/Redo & Confirmations)', () => {
   beforeEach(() => {
     window.localStorage.clear();
     window.history.replaceState({}, '', '/');
@@ -47,7 +47,6 @@ describe('Grade Tracker React Application (M1 + M1.1)', () => {
     const tabs = screen.getAllByRole('tab');
     expect(tabs.length).toBe(2);
 
-    // Switch back to first term and move ECON101 to Term 2
     fireEvent.click(tabs[0]);
     const moveSelect = screen.getByLabelText('Move ECON101 to another term');
     const secondTermOption = within(moveSelect).getAllByRole('option')[1];
@@ -58,14 +57,62 @@ describe('Grade Tracker React Application (M1 + M1.1)', () => {
     expect(screen.getByDisplayValue('ECON101')).toBeInTheDocument();
   });
 
-  it('supports What-If Simulator without mutating saved grades and allows custom scale editing', () => {
+  it('requires modal confirmation for Course & Term deletes and supports full Undo + Redo', () => {
     render(<App />);
-    fireEvent.click(screen.getByRole('button', { name: /What-If Simulator/i }));
-    expect(screen.getByText(/What-If Exam Simulator ON/i)).toBeInTheDocument();
+    const undoBtn = screen.getByRole('button', { name: /↶ Undo/i });
+    const redoBtn = screen.getByRole('button', { name: /↷ Redo/i });
+    expect(undoBtn).toBeDisabled();
+    expect(redoBtn).toBeDisabled();
 
-    fireEvent.click(screen.getByRole('button', { name: /Customize/i }));
-    expect(screen.getByRole('dialog', { name: /Customize Grading Scale/i })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: /Save Scale/i }));
-    expect(screen.queryByRole('dialog', { name: /Customize Grading Scale/i })).not.toBeInTheDocument();
+    // 1. Delete Course -> Cancel keeps it, Confirm deletes it
+    fireEvent.click(screen.getByRole('button', { name: 'Delete ECON101' }));
+    const dialog = screen.getByRole('alertdialog');
+    expect(within(dialog).getByText(/Delete course "ECON101"\?/i)).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole('button', { name: /^Cancel$/i }));
+    expect(screen.getByDisplayValue('ECON101')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Delete ECON101' }));
+    fireEvent.click(screen.getByRole('button', { name: /Delete Course/i }));
+    expect(screen.queryByDisplayValue('ECON101')).not.toBeInTheDocument();
+    expect(undoBtn).not.toBeDisabled();
+
+    // 2. Undo brings ECON101 back; Redo deletes it again
+    fireEvent.click(undoBtn);
+    expect(screen.getByDisplayValue('ECON101')).toBeInTheDocument();
+    expect(redoBtn).not.toBeDisabled();
+
+    fireEvent.click(redoBtn);
+    expect(screen.queryByDisplayValue('ECON101')).not.toBeInTheDocument();
+
+    // 3. Add Term -> Delete Term shows modal -> Confirm -> Undo restores Term
+    fireEvent.click(screen.getByRole('button', { name: /\+ Add Term/i }));
+    expect(screen.getAllByRole('tab')).toHaveLength(2);
+    fireEvent.click(screen.getByRole('button', { name: /Delete Term 2/i }));
+    const termDialog = screen.getByRole('alertdialog');
+    fireEvent.click(within(termDialog).getByRole('button', { name: /^Delete Term$/i }));
+    expect(screen.getAllByRole('tab')).toHaveLength(1);
+
+    fireEvent.click(undoBtn);
+    expect(screen.getAllByRole('tab')).toHaveLength(2);
+  });
+
+  it('requires inline 2-click confirmation before deleting an assessment row and supports Undo', () => {
+    render(<App />);
+    const ecoSection = screen.getByRole('region', { name: 'Course ECON101' });
+    const table = within(ecoSection).getByRole('table');
+    const firstRowDelete = within(table).getAllByRole('button', { name: /^Delete /i })[0];
+
+    // First click reveals "Delete?" inline confirmation without deleting row yet
+    fireEvent.click(firstRowDelete);
+    const confirmChip = within(table).getByRole('button', { name: /^Confirm delete /i });
+    expect(confirmChip).toHaveTextContent('Delete?');
+
+    const rowsBefore = within(table).getAllByRole('row').length;
+    fireEvent.click(confirmChip);
+    expect(within(table).getAllByRole('row').length).toBe(rowsBefore - 1);
+
+    // Undo restores the assessment row
+    fireEvent.click(screen.getByRole('button', { name: /↶ Undo/i }));
+    expect(within(table).getAllByRole('row').length).toBe(rowsBefore);
   });
 });

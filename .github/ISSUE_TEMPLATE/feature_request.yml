@@ -1,0 +1,13 @@
+name: Feature Request
+description: Suggest an improvement or new feature for Grade Tracker
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would you like to add or improve?
+      description: Describe how you'd like it to work.
+      placeholder: e.g. Ability to expand a Quiz category into individual Quiz 1..10 scores and drop the lowest mark...
+    validations:
+      required: true
