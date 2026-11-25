@@ -1,0 +1,18 @@
+# Agent orchestration & local scratch
+.agents/
+
+# Node / Vite / Vitest
+node_modules/
+dist/
+.vite/
+coverage/
+*.local
+
+# Python / Playwright E2E
+__pycache__/
+.pytest_cache/
+test-results/
+playwright-report/
+
+# OS metadata
+.DS_Store
