@@ -1,0 +1,91 @@
+# AGENTS.md — AI Coding Agent & Maintainer Guide
+
+Read this file and [`docs/ROADMAP.md`](docs/ROADMAP.md) first before modifying the repository. Together they capture the architecture, invariants, and planned milestones so you do not need to reverse-engineer the codebase.
+
+---
+
+## 1. Project Overview
+
+**Grade Tracker** is a static, offline-first course grade and GPA web application deployed on GitHub Pages (`https://igorshakhov.github.io/grade-tracker/`).
+
+- **Stack**: React 19 + Vite (`base: './'`) + Vanilla CSS + Vitest (`jsdom` + `@testing-library/react`).
+- **Styling Policy**: Pure Vanilla CSS in `src/styles/index.css` using curated HSL custom properties and `Plus Jakarta Sans` + `JetBrains Mono` (`tabular-nums`). Do **not** introduce TailwindCSS or CSS-in-JS libraries unless explicitly requested.
+- **Privacy & Generic Repo Policy**: Because this repository is public (to support GitHub Free Pages), keep **zero** personal names or university-specific identifiers in source code, default templates, tests, commit messages, or docs. Personal/institution customizations belong in user-configurable settings or imported/synced user data.
+
+---
+
+## 2. Directory & Module Map
+
+```text
+.
+├── index.html                        # Entry HTML, Google Fonts, SVG icon
+├── vite.config.js                    # Vite build (base: './') + Vitest jsdom config
+├── src/
+│   ├── main.jsx                      # React 19 StrictMode root
+│   ├── App.jsx                       # Top-level state, atomic Undo/Redo history, modals
+│   ├── domain/
+│   │   ├── constants.js              # STORAGE_KEY, DEFAULT_GRADE_SCALE, UNIT_OPTIONS, TARGET_PRESETS
+│   │   ├── templates.js              # createInitialState, createEmptyState, course/term factories
+│   │   ├── calculations.js           # Pure math: roundHalfUp, lookupGrade, course/term/cumulative GPA, target calculator
+│   │   └── operations.js             # Pure immutable helpers: reorder, moveCourseToTerm, duplicateCourseInTerm, collapseAll
+│   ├── services/
+│   │   ├── storage.js                # validateTrackerState, StorageService (localStorage + registerCloudAdapter hook)
+│   │   ├── share.js                  # CompressionStream ('z1.') / base64url ('u1.') read-only URL snapshot codec
+│   │   └── exporters.js              # JSON import/export & UTF-8 BOM RFC-4180 Excel CSV exporter
+│   ├── components/
+│   │   ├── HeaderLedger.jsx          # Owner input, Undo/Redo, What-If toggle, Share, Import/Export, 4 summary metrics
+│   │   ├── TermTabs.jsx              # Multi-term tabs, inline rename, delete trigger, Collapse/Expand All
+│   │   ├── CourseCard.jsx            # Collapsible/draggable course sheet, inline numeric cells, 2-click row delete, target bar
+│   │   ├── GradeScaleCard.jsx        # Sticky Grading Scale reference + Customize trigger
+│   │   └── Modals.jsx                # ShareModal, DataModal, ScaleEditorModal, ConfirmDeleteModal
+│   └── styles/
+│       └── index.css                 # Complete Vanilla CSS design system, responsive breakpoints, @media print
+├── tests/unit/
+│   ├── calculations.test.js          # Weighted math, rounding, custom scales, Pass/Fail, target edge cases
+│   ├── share.test.js                 # Compressed URL snapshot round-trips & malformed token safety
+│   ├── storage-export.test.js        # Schema validation, migrations, cloud adapter hooks, JSON/CSV export
+│   ├── operations.test.js            # Reorder, duplicate, move-to-term, collapse helpers
+│   └── app.test.jsx                  # React integration tests (M1 + M1.1 + Undo/Redo + delete confirmations)
+└── .github/
+    ├── workflows/deploy.yml          # CI/CD: npm ci -> npm test -> npm run build -> deploy ./dist to GitHub Pages
+    └── ISSUE_TEMPLATE/               # Structured Bug Report & Feature Request forms
+```
+
+---
+
+## 3. Core Architectural Invariants
+
+1. **Running Course Grade Math (`src/domain/calculations.js`)**:
+   - Blank (`grade: null`) assessment categories do **not** penalize the running course grade; `overallGrade` is the weighted average of graded categories only (`weightedPoints / gradedWeight * 100`).
+   - Final course percentage is rounded half-up to the nearest integer (`roundHalfUp(clamped, 0)`) when looking up the letter grade and GPA in `lookupGrade(percentage, gradeScale)`.
+   - Display percentages use half-up rounding (`roundHalfUp(val, 2)`) so IEEE-754 boundary values like `85.305` format consistently as `85.31%`.
+   - Courses with `passFail: true` display `P` / `NP` / `P/F` and are excluded from GPA denominators while still counting toward enrolled credits and weighted percentage averages.
+
+2. **Atomic State + Undo/Redo (`src/App.jsx`)**:
+   - `App.jsx` stores `{ current, past, future }` in a single `doc` state object so `commitState`, `handleUndo`, and `handleRedo` remain 100% pure under React 19 `<StrictMode>`.
+   - Rapid consecutive character edits sharing a `coalesceKey` within `700ms` coalesce into a single Undo step; structural mutations and deletions never coalesce.
+   - UI-only toggles (`activeTermId` tab switch, `collapsed` fold state) use `updateCurrentWithoutHistory` so folding cards does not pollute the Undo stack or touch `lastUpdated`.
+
+3. **Destructive Action Safety**:
+   - Deleting a **Term** or **Course** must open `ConfirmDeleteModal`.
+   - Deleting an **Assessment Row** uses inline 2-step confirmation (`×` → `Delete?`) inside `CourseCard.jsx`.
+   - Every confirmed deletion pushes onto the Undo stack and surfaces an inline `Undo` action in the toast notification.
+
+4. **Pluggable Storage & Cloud Sync (`src/services/storage.js`)**:
+   - All state passes through `validateTrackerState()` before saving or importing, returning freshly cloned objects without mutating inputs.
+   - Future remote sync (see Milestone 2 in [`docs/ROADMAP.md`](docs/ROADMAP.md)) plugs into `storageService.registerCloudAdapter(adapter)` without requiring UI component rewrites.
+
+---
+
+## 4. Development, Verification & Release Workflow
+
+```bash
+npm install          # Install dependencies
+npm test             # Run all Vitest unit + React UI tests (must pass 100%)
+npm run build        # Verify production Vite bundle in ./dist
+```
+
+### Git & Pull Request Conventions
+- Work on a descriptive branch (`feat/...`, `fix/...`, `docs/...`), verify `npm test && npm run build`, open a Pull Request against `main` with a clear structured summary body, and squash-merge (`gh pr merge --squash --delete-branch`).
+- The repository is configured with `squash_merge_commit_title=PR_TITLE` and `squash_merge_commit_message=PR_BODY`, so writing a thorough PR description automatically records a clean changelog entry in `git log` on `main` and triggers `.github/workflows/deploy.yml` to publish to GitHub Pages.
+- Check open issues first when picking up new work: `gh issue list --state open`.

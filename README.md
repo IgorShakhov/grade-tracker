@@ -63,3 +63,9 @@ registerCloudAdapter({
   },
 });
 ```
+
+## Architecture & Project Roadmap
+
+- **[`AGENTS.md`](AGENTS.md)** — Module map, calculation/state invariants, and development workflow for maintainers and AI coding agents.
+- **[`docs/ROADMAP.md`](docs/ROADMAP.md)** — Shipped milestones, upcoming roadmap (`grades.json` GitHub sync, sub-assessments, PWA, degree progress), and recorded architectural decisions.
+
