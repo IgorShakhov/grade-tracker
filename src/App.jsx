@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { DEFAULT_GRADE_SCALE } from './domain/constants.js';
 import {
   createInitialState,
@@ -34,34 +34,51 @@ import HeaderLedger from './components/HeaderLedger.jsx';
 import TermTabs from './components/TermTabs.jsx';
 import CourseCard from './components/CourseCard.jsx';
 import GradeScaleCard from './components/GradeScaleCard.jsx';
-import { ShareModal, DataModal, ScaleEditorModal } from './components/Modals.jsx';
+import {
+  ShareModal,
+  DataModal,
+  ScaleEditorModal,
+  ConfirmDeleteModal,
+} from './components/Modals.jsx';
+
+const MAX_HISTORY = 30;
+const COALESCE_WINDOW_MS = 700;
 
 export default function App() {
-  const [state, setState] = useState(() => storageService.load());
+  const [doc, setDoc] = useState(() => ({
+    current: storageService.load(),
+    past: [],
+    future: [],
+  }));
+  const state = doc.current;
+  const lastCoalesceRef = useRef({ key: null, time: 0 });
+
   const [sharedState, setSharedState] = useState(null);
   const [simMode, setSimMode] = useState(false);
   const [simGrades, setSimGrades] = useState({});
   const [shareModalUrl, setShareModalUrl] = useState(null);
   const [showDataModal, setShowDataModal] = useState(false);
   const [showScaleModal, setShowScaleModal] = useState(false);
+  const [pendingDelete, setPendingDelete] = useState(null);
   const [dragIndex, setDragIndex] = useState(null);
   const [dragOverIndex, setDragOverIndex] = useState(null);
-  const [toastMsg, setToastMsg] = useState('');
+  const [toast, setToast] = useState(null);
 
-  const showToast = useCallback((msg) => {
-    setToastMsg(msg);
+  const showToast = useCallback((text, { showUndo = false } = {}) => {
+    setToast({ text, showUndo });
   }, []);
 
   useEffect(() => {
-    if (!toastMsg) return undefined;
-    const t = setTimeout(() => setToastMsg(''), 2600);
+    if (!toast) return undefined;
+    const duration = toast.showUndo ? 5500 : 2600;
+    const t = setTimeout(() => setToast(null), duration);
     return () => clearTimeout(t);
-  }, [toastMsg]);
+  }, [toast]);
 
   // Subscribe to remote cloud adapter updates if connected
   useEffect(() => {
     return storageService.subscribe((remoteState) => {
-      setState(remoteState);
+      setDoc((prev) => ({ ...prev, current: remoteState }));
     });
   }, []);
 
@@ -90,12 +107,105 @@ export default function App() {
   const readOnly = Boolean(sharedState);
   const activeState = sharedState || state;
 
-  const commitState = useCallback((updater) => {
-    setState((prev) => {
-      const next = typeof updater === 'function' ? updater(prev) : updater;
-      return storageService.save(next, { touchTimestamp: true });
+  const updateCurrentWithoutHistory = useCallback(
+    (updater, { touchTimestamp = false } = {}) => {
+      setDoc((prev) => {
+        const nextCurrent =
+          typeof updater === 'function' ? updater(prev.current) : updater;
+        const saved = storageService.save(nextCurrent, { touchTimestamp });
+        return { ...prev, current: saved };
+      });
+    },
+    [],
+  );
+
+  /**
+   * Commits a user mutation to localStorage and records an Undo snapshot.
+   * Rapid consecutive text edits with the same `coalesceKey` are grouped into one Undo step.
+   */
+  const commitState = useCallback(
+    (updater, { coalesceKey = null, touchTimestamp = true } = {}) => {
+      const now = Date.now();
+      const shouldCoalesce =
+        coalesceKey !== null &&
+        lastCoalesceRef.current.key === coalesceKey &&
+        now - lastCoalesceRef.current.time < COALESCE_WINDOW_MS;
+      lastCoalesceRef.current = { key: coalesceKey, time: now };
+
+      setDoc((prev) => {
+        const computed =
+          typeof updater === 'function' ? updater(prev.current) : updater;
+        if (computed === prev.current) return prev;
+        const saved = storageService.save(computed, { touchTimestamp });
+        return {
+          current: saved,
+          past: shouldCoalesce
+            ? prev.past
+            : [...prev.past.slice(-(MAX_HISTORY - 1)), prev.current],
+          future: [],
+        };
+      });
+    },
+    [],
+  );
+
+  const handleUndo = useCallback(() => {
+    if (readOnly) return;
+    lastCoalesceRef.current = { key: null, time: 0 };
+    setDoc((prev) => {
+      if (prev.past.length === 0) return prev;
+      const previous = prev.past[prev.past.length - 1];
+      const restored = storageService.save(previous, { touchTimestamp: true });
+      return {
+        current: restored,
+        past: prev.past.slice(0, -1),
+        future: [prev.current, ...prev.future.slice(0, MAX_HISTORY - 1)],
+      };
     });
-  }, []);
+    showToast('Undid last change.');
+  }, [readOnly, showToast]);
+
+  const handleRedo = useCallback(() => {
+    if (readOnly) return;
+    lastCoalesceRef.current = { key: null, time: 0 };
+    setDoc((prev) => {
+      if (prev.future.length === 0) return prev;
+      const [nextItem, ...remainingFuture] = prev.future;
+      const restored = storageService.save(nextItem, { touchTimestamp: true });
+      return {
+        current: restored,
+        past: [...prev.past.slice(-(MAX_HISTORY - 1)), prev.current],
+        future: remainingFuture,
+      };
+    });
+    showToast('Redid change.');
+  }, [readOnly, showToast]);
+
+  // Global keyboard shortcuts: Ctrl/Cmd+Z (Undo) and Ctrl/Cmd+Shift+Z or Ctrl+Y (Redo)
+  useEffect(() => {
+    if (readOnly) return undefined;
+    function onKeyDown(e) {
+      if (!(e.metaKey || e.ctrlKey) || e.altKey) return;
+      const tag = e.target?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || e.target?.isContentEditable) {
+        return;
+      }
+      const key = e.key.toLowerCase();
+      if (key === 'z' && !e.shiftKey) {
+        if (doc.past.length > 0) {
+          e.preventDefault();
+          handleUndo();
+        }
+      } else if ((key === 'z' && e.shiftKey) || (!e.metaKey && key === 'y')) {
+        if (doc.future.length > 0) {
+          e.preventDefault();
+          handleRedo();
+        }
+      }
+    }
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [readOnly, doc.past.length, doc.future.length, handleUndo, handleRedo]);
 
   const activeTerm =
     activeState.terms.find((t) => t.id === activeState.activeTermId) ||
@@ -120,8 +230,7 @@ export default function App() {
 
   function handleSaveSharedCopyLocally() {
     if (!sharedState) return;
-    const saved = storageService.save(sharedState, { touchTimestamp: true });
-    setState(saved);
+    commitState(sharedState);
     clearShareParamsFromCurrentUrl(window);
     setSharedState(null);
     showToast('Saved shared courses into your local tracker.');
@@ -154,10 +263,7 @@ export default function App() {
       setSharedState((prev) => ({ ...prev, activeTermId: termId }));
       return;
     }
-    setState((prev) => {
-      const next = { ...prev, activeTermId: termId };
-      return storageService.save(next, { touchTimestamp: false });
-    });
+    updateCurrentWithoutHistory((prev) => ({ ...prev, activeTermId: termId }));
   }
 
   function handleAddTerm() {
@@ -178,17 +284,18 @@ export default function App() {
     }));
   }
 
-  function handleDeleteTerm(termId) {
-    commitState((prev) => {
-      if (prev.terms.length <= 1) return prev;
-      const remaining = prev.terms.filter((t) => t.id !== termId);
-      const nextActive =
-        prev.activeTermId === termId ? remaining[0].id : prev.activeTermId;
-      return {
-        ...prev,
-        activeTermId: nextActive,
-        terms: remaining,
-      };
+  function requestDeleteTerm(termId) {
+    const term = activeState.terms.find((t) => t.id === termId);
+    if (!term || activeState.terms.length <= 1) return;
+    const count = term.courses.length;
+    setPendingDelete({
+      kind: 'term',
+      termId,
+      title: `Delete "${term.name}"?`,
+      message: `This will delete "${term.name}" and its ${count} course${
+        count === 1 ? '' : 's'
+      }. You can still Undo right after.`,
+      confirmLabel: 'Delete Term',
     });
   }
 
@@ -223,7 +330,10 @@ export default function App() {
   }
 
   function handleUpdateCourse(courseId, patch) {
-    if (readOnly && Object.keys(patch).every((k) => k === 'collapsed')) {
+    const keys = Object.keys(patch);
+    const onlyUiState = keys.every((k) => k === 'collapsed');
+
+    if (readOnly && onlyUiState) {
       setSharedState((prev) => ({
         ...prev,
         terms: prev.terms.map((t) =>
@@ -239,9 +349,9 @@ export default function App() {
       }));
       return;
     }
-    const onlyUiState = Object.keys(patch).every((k) => k === 'collapsed');
-    setState((prev) => {
-      const next = {
+
+    if (onlyUiState) {
+      updateCurrentWithoutHistory((prev) => ({
         ...prev,
         terms: prev.terms.map((t) =>
           t.id !== activeTerm.id
@@ -253,20 +363,81 @@ export default function App() {
                 ),
               },
         ),
-      };
-      return storageService.save(next, { touchTimestamp: !onlyUiState });
+      }));
+      return;
+    }
+
+    const isTextPatch = keys.every((k) => k === 'code' || k === 'title');
+    commitState(
+      (prev) => ({
+        ...prev,
+        terms: prev.terms.map((t) =>
+          t.id !== activeTerm.id
+            ? t
+            : {
+                ...t,
+                courses: t.courses.map((c) =>
+                  c.id === courseId ? { ...c, ...patch } : c,
+                ),
+              },
+        ),
+      }),
+      { coalesceKey: isTextPatch ? `course-${courseId}-${keys[0]}` : null },
+    );
+  }
+
+  function requestDeleteCourse(course) {
+    const catCount = course.categories.length;
+    setPendingDelete({
+      kind: 'course',
+      termId: activeTerm.id,
+      courseId: course.id,
+      code: course.code,
+      title: `Delete course "${course.code}"?`,
+      message: `This will remove "${course.code}"${
+        course.title ? ` (${course.title})` : ''
+      } and its ${catCount} assessment row${
+        catCount === 1 ? '' : 's'
+      }. You can still Undo afterward.`,
+      confirmLabel: 'Delete Course',
     });
   }
 
-  function handleDeleteCourse(courseId) {
-    commitState((prev) => ({
-      ...prev,
-      terms: prev.terms.map((t) =>
-        t.id !== activeTerm.id
-          ? t
-          : { ...t, courses: t.courses.filter((c) => c.id !== courseId) },
-      ),
-    }));
+  function confirmPendingDelete() {
+    if (!pendingDelete) return;
+    if (pendingDelete.kind === 'term') {
+      const target = activeState.terms.find((t) => t.id === pendingDelete.termId);
+      commitState((prev) => {
+        if (prev.terms.length <= 1) return prev;
+        const remaining = prev.terms.filter((t) => t.id !== pendingDelete.termId);
+        const nextActive =
+          prev.activeTermId === pendingDelete.termId
+            ? remaining[0].id
+            : prev.activeTermId;
+        return {
+          ...prev,
+          activeTermId: nextActive,
+          terms: remaining,
+        };
+      });
+      setPendingDelete(null);
+      showToast(`Deleted term "${target?.name || 'Term'}".`, { showUndo: true });
+    } else if (pendingDelete.kind === 'course') {
+      const label = pendingDelete.code || 'Course';
+      commitState((prev) => ({
+        ...prev,
+        terms: prev.terms.map((t) =>
+          t.id !== pendingDelete.termId
+            ? t
+            : {
+                ...t,
+                courses: t.courses.filter((c) => c.id !== pendingDelete.courseId),
+              },
+        ),
+      }));
+      setPendingDelete(null);
+      showToast(`Deleted course "${label}".`, { showUndo: true });
+    }
   }
 
   function handleToggleCollapseAll() {
@@ -277,10 +448,9 @@ export default function App() {
       );
       return;
     }
-    setState((prev) => {
-      const next = setAllCoursesCollapsed(prev, activeTerm.id, targetCollapsed);
-      return storageService.save(next, { touchTimestamp: false });
-    });
+    updateCurrentWithoutHistory((prev) =>
+      setAllCoursesCollapsed(prev, activeTerm.id, targetCollapsed),
+    );
   }
 
   // --- Category Mutations ---
@@ -303,29 +473,33 @@ export default function App() {
   }
 
   function handleUpdateCategory(courseId, catId, patch) {
-    commitState((prev) => ({
-      ...prev,
-      terms: prev.terms.map((t) =>
-        t.id !== activeTerm.id
-          ? t
-          : {
-              ...t,
-              courses: t.courses.map((c) =>
-                c.id !== courseId
-                  ? c
-                  : {
-                      ...c,
-                      categories: c.categories.map((cat) =>
-                        cat.id === catId ? { ...cat, ...patch } : cat,
-                      ),
-                    },
-              ),
-            },
-      ),
-    }));
+    const keys = Object.keys(patch);
+    commitState(
+      (prev) => ({
+        ...prev,
+        terms: prev.terms.map((t) =>
+          t.id !== activeTerm.id
+            ? t
+            : {
+                ...t,
+                courses: t.courses.map((c) =>
+                  c.id !== courseId
+                    ? c
+                    : {
+                        ...c,
+                        categories: c.categories.map((cat) =>
+                          cat.id === catId ? { ...cat, ...patch } : cat,
+                        ),
+                      },
+                ),
+              },
+        ),
+      }),
+      { coalesceKey: `cat-${catId}-${keys[0]}` },
+    );
   }
 
-  function handleDeleteCategory(courseId, catId) {
+  function handleDeleteCategory(courseId, catId, catName = 'Assessment') {
     commitState((prev) => ({
       ...prev,
       terms: prev.terms.map((t) =>
@@ -344,6 +518,7 @@ export default function App() {
             },
       ),
     }));
+    showToast(`Deleted "${catName}".`, { showUndo: true });
   }
 
   function handleUpdateSimGrade(catId, value) {
@@ -434,8 +609,15 @@ export default function App() {
         stats={stats}
         hasMultipleTerms={activeState.terms.length > 1}
         activeTermName={activeTerm?.name || 'Term'}
+        canUndo={doc.past.length > 0}
+        canRedo={doc.future.length > 0}
+        onUndo={handleUndo}
+        onRedo={handleRedo}
         onChangeName={(name) =>
-          commitState((prev) => ({ ...prev, studentName: name }))
+          commitState(
+            (prev) => ({ ...prev, studentName: name }),
+            { coalesceKey: 'owner-name' },
+          )
         }
         onToggleSimMode={() => setSimMode((v) => !v)}
         onOpenShare={handleOpenShareModal}
@@ -452,7 +634,7 @@ export default function App() {
           onSelectTerm={handleSelectTerm}
           onAddTerm={handleAddTerm}
           onRenameTerm={handleRenameTerm}
-          onDeleteTerm={handleDeleteTerm}
+          onDeleteTerm={requestDeleteTerm}
           onToggleCollapseAll={handleToggleCollapseAll}
         />
 
@@ -503,7 +685,7 @@ export default function App() {
                   );
                   showToast(`Duplicated ${course.code} structure.`);
                 }}
-                onDeleteCourse={() => handleDeleteCourse(course.id)}
+                onDeleteCourse={() => requestDeleteCourse(course)}
                 onMoveCourseToTerm={(toTermId) => {
                   const dest = activeState.terms.find((t) => t.id === toTermId);
                   commitState((prev) =>
@@ -528,14 +710,18 @@ export default function App() {
                     ),
                   )
                 }
-                onDeleteCategory={(catId) => handleDeleteCategory(course.id, catId)}
+                onDeleteCategory={(catId, catName) =>
+                  handleDeleteCategory(course.id, catId, catName)
+                }
                 onUpdateSimGrade={handleUpdateSimGrade}
               />
             ))}
 
             {!readOnly && (
               <div className="add-course-bar">
-                <span className="add-course-bar-label">Add Course to {activeTerm?.name}:</span>
+                <span className="add-course-bar-label">
+                  Add Course to {activeTerm?.name}:
+                </span>
                 <div className="add-course-options">
                   <button
                     id="add-standard-course-btn"
@@ -601,22 +787,19 @@ export default function App() {
           onExportCsv={() => exportStateAsCsv(activeState)}
           onImportJsonFile={(text) => {
             const imported = parseImportedJson(text);
-            const saved = storageService.save(imported, { touchTimestamp: false });
-            setState(saved);
+            commitState(imported, { touchTimestamp: false });
             setSimGrades({});
             showToast('Imported JSON tracker data.');
           }}
           onLoadSample={() => {
             const sample = createInitialState();
-            const saved = storageService.save(sample, { touchTimestamp: true });
-            setState(saved);
+            commitState(sample);
             setSimGrades({});
             showToast('Loaded sample courses.');
           }}
           onResetEmpty={() => {
             const empty = createEmptyState();
-            const saved = storageService.save(empty, { touchTimestamp: true });
-            setState(saved);
+            commitState(empty);
             setSimGrades({});
             showToast('Started fresh blank tracker.');
           }}
@@ -634,9 +817,28 @@ export default function App() {
         />
       )}
 
-      {toastMsg && (
+      {pendingDelete && !readOnly && (
+        <ConfirmDeleteModal
+          title={pendingDelete.title}
+          message={pendingDelete.message}
+          confirmLabel={pendingDelete.confirmLabel}
+          onConfirm={confirmPendingDelete}
+          onClose={() => setPendingDelete(null)}
+        />
+      )}
+
+      {toast && (
         <div className="toast" role="status" aria-live="polite">
-          {toastMsg}
+          <span>{toast.text}</span>
+          {toast.showUndo && doc.past.length > 0 && (
+            <button
+              type="button"
+              className="toast-undo-btn"
+              onClick={handleUndo}
+            >
+              Undo
+            </button>
+          )}
         </div>
       )}
     </div>

@@ -1363,6 +1363,65 @@ body {
   margin-top: 0.85rem;
 }
 
+.btn-danger {
+  background: var(--danger-fg);
+  border-color: var(--danger-fg);
+  color: #fff;
+}
+
+.btn-danger:hover:not(:disabled) {
+  background: hsl(356, 68%, 33%);
+  border-color: hsl(356, 68%, 33%);
+}
+
+.undo-redo-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.28rem;
+}
+
+.inline-confirm-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.22rem;
+  white-space: nowrap;
+}
+
+.inline-confirm-btn {
+  background: var(--danger-fg);
+  color: #fff;
+  border: none;
+  border-radius: var(--radius-xs);
+  font-family: var(--font-sans);
+  font-size: 0.72rem;
+  font-weight: 700;
+  padding: 0.22rem 0.46rem;
+  cursor: pointer;
+}
+
+.inline-confirm-btn:hover {
+  background: hsl(356, 68%, 33%);
+}
+
+.inline-cancel-btn {
+  background: var(--bg-surface-subtle);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-xs);
+  width: 22px;
+  height: 22px;
+  display: inline-grid;
+  place-items: center;
+  font-size: 0.75rem;
+  padding: 0;
+  cursor: pointer;
+}
+
+.inline-cancel-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
 /* Toast Notification */
 .toast {
   position: fixed;
@@ -1372,10 +1431,29 @@ body {
   color: #fff;
   font-size: 0.82rem;
   font-weight: 500;
-  padding: 0.62rem 0.98rem;
+  padding: 0.6rem 0.95rem;
   border-radius: var(--radius-sm);
   box-shadow: var(--shadow-elevated);
   z-index: 200;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.7rem;
+}
+
+.toast-undo-btn {
+  background: hsla(0, 0%, 100%, 0.16);
+  border: 1px solid hsla(0, 0%, 100%, 0.32);
+  color: #fff;
+  font-family: var(--font-sans);
+  font-size: 0.76rem;
+  font-weight: 700;
+  padding: 0.2rem 0.55rem;
+  border-radius: var(--radius-xs);
+  cursor: pointer;
+}
+
+.toast-undo-btn:hover {
+  background: hsla(0, 0%, 100%, 0.28);
 }
 
 /* ==========================================================================

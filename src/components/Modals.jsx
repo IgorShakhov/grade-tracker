@@ -1,4 +1,4 @@
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { DEFAULT_GRADE_SCALE } from '../domain/constants.js';
 
 export function ShareModal({ shareUrl, onClose, onCopy }) {
@@ -395,6 +395,70 @@ export function ScaleEditorModal({ gradeScale, onSaveScale, onClose }) {
             </div>
             <button type="button" className="btn btn-primary btn-sm" onClick={handleSave}>
               Save Scale
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export function ConfirmDeleteModal({
+  title,
+  message,
+  confirmLabel = 'Delete',
+  onConfirm,
+  onClose,
+}) {
+  useEffect(() => {
+    function handleKeyDown(e) {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        onClose();
+      } else if (e.key === 'Enter') {
+        e.preventDefault();
+        onConfirm();
+      }
+    }
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [onConfirm, onClose]);
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div
+        className="modal-panel"
+        style={{ maxWidth: '420px' }}
+        role="alertdialog"
+        aria-modal="true"
+        aria-labelledby="confirm-delete-title"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="modal-header">
+          <h2 id="confirm-delete-title">{title}</h2>
+          <button
+            type="button"
+            className="modal-close"
+            onClick={onClose}
+            aria-label="Cancel deletion"
+          >
+            ×
+          </button>
+        </div>
+
+        <div className="modal-body">
+          <p>{message}</p>
+          <div className="modal-footer-btns" style={{ justifyContent: 'flex-end' }}>
+            <button type="button" className="btn btn-sm" onClick={onClose}>
+              Cancel
+            </button>
+            <button
+              id="confirm-delete-btn"
+              type="button"
+              className="btn btn-danger btn-sm"
+              onClick={onConfirm}
+            >
+              {confirmLabel}
             </button>
           </div>
         </div>

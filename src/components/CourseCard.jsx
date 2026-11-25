@@ -112,6 +112,14 @@ export default function CourseCard({
   onDeleteCategory,
   onUpdateSimGrade,
 }) {
+  const [confirmingCatId, setConfirmingCatId] = useState(null);
+
+  useEffect(() => {
+    if (!confirmingCatId) return undefined;
+    const timer = setTimeout(() => setConfirmingCatId(null), 4500);
+    return () => clearTimeout(timer);
+  }, [confirmingCatId]);
+
   const stats = calculateCourseStats(course, simMode ? simGrades : null, gradeScale);
   const targetPct = typeof course.targetPct === 'number' ? course.targetPct : 85;
   const targetInfo = calculateTargetRequirement(
@@ -402,16 +410,41 @@ export default function CourseCard({
                       </td>
 
                       {!readOnly && (
-                        <td>
-                          <button
-                            type="button"
-                            className="row-delete-btn"
-                            onClick={() => onDeleteCategory(cat.id)}
-                            title="Delete assessment row"
-                            aria-label={`Delete ${cat.name}`}
-                          >
-                            ×
-                          </button>
+                        <td style={{ textAlign: 'right' }}>
+                          {confirmingCatId === cat.id ? (
+                            <span className="inline-confirm-wrap">
+                              <button
+                                type="button"
+                                className="inline-confirm-btn"
+                                onClick={() => {
+                                  setConfirmingCatId(null);
+                                  onDeleteCategory(cat.id, cat.name);
+                                }}
+                                aria-label={`Confirm delete ${cat.name}`}
+                              >
+                                Delete?
+                              </button>
+                              <button
+                                type="button"
+                                className="inline-cancel-btn"
+                                onClick={() => setConfirmingCatId(null)}
+                                title="Cancel"
+                                aria-label={`Cancel delete ${cat.name}`}
+                              >
+                                ×
+                              </button>
+                            </span>
+                          ) : (
+                            <button
+                              type="button"
+                              className="row-delete-btn"
+                              onClick={() => setConfirmingCatId(cat.id)}
+                              title="Delete assessment row"
+                              aria-label={`Delete ${cat.name}`}
+                            >
+                              ×
+                            </button>
+                          )}
                         </td>
                       )}
                     </tr>
