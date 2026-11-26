@@ -33,7 +33,10 @@ Prerequisites: Node.js 22+ and npm.
 # Install dependencies
 npm install
 
-# Start the local development server
+# (Optional) Enable Google Cloud Sync locally by copying .env.example -> .env.local
+cp .env.example .env.local
+
+# Start the local development server (works offline-only even without .env.local)
 npm run dev
 
 # Run the unit & UI test suite
@@ -48,13 +51,14 @@ npm run build
 Deployment to GitHub Pages is automated via [`.github/workflows/deploy.yml`](.github/workflows/deploy.yml).
 
 1. Push the repository to GitHub with `main` as your default branch.
-2. In your GitHub repository, go to **Settings → Pages → Build and deployment → Source** and select **GitHub Actions**.
-3. Every push to `main` (or manual `workflow_dispatch` trigger) runs `npm ci`, `npm test`, and `npm run build`, then publishes `./dist` to GitHub Pages.
+2. Under **Settings → Secrets and variables → Actions**, configure the `VITE_FIREBASE_*` repository secrets listed in [`.env.example`](.env.example).
+3. Under **Settings → Pages → Build and deployment → Source**, select **GitHub Actions**.
+4. Every push to `main` (or manual `workflow_dispatch` trigger) runs `npm ci`, `npm test`, and `npm run build`, then publishes `./dist` to GitHub Pages.
 
 ## Cloud Sync & Security Model
 
 Grade Tracker combines instant offline-first `localStorage` ([`src/services/storage.js`](src/services/storage.js)) with Firebase Authentication (Google Sign-In) and Cloud Firestore ([`src/services/cloudSync.js`](src/services/cloudSync.js), [`firestore.rules`](firestore.rules)):
 
-- **Zero Grade Data on GitHub**: The public GitHub repository hosts only static application code and the public Firebase web app identifier (`src/services/firebase.js`). All synced course data lives privately in Firestore (`users/{uid}`) and the local browser cache.
+- **Zero Grade Data or Keys in Source**: The public GitHub repository hosts only static application code (`VITE_FIREBASE_*` web app identifiers are injected at build time via GitHub Actions Secrets). All synced course data lives privately in Firestore (`users/{uid}`) and the local browser cache.
 - **Hardened Firestore Rules (`firestore.rules`)**: Per-user documents are strictly owner-only (`request.auth.uid == uid`, non-listable) with server-timestamp validation (`updatedAt == request.time`), monotonic revision counters (`rev`) to prevent stale multi-device overwrites, and zero stored PII (no email, name, or photo stored in Firestore).
 - **Revocable Live Read-Only Links (`#view=<token>`)**: Enabling a live link writes a 192-bit random token tied 1-to-1 to the owner's `shareToken` via `getAfter(...)` in a single atomic `writeBatch`. Tokens stay in the URL `#` fragment (`no-referrer` enforced in `index.html`) and can be rotated or turned off atomically at any time.

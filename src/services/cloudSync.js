@@ -227,6 +227,9 @@ function formatFriendlyError(err) {
   if (code === 'auth/popup-closed-by-user' || code === 'auth/cancelled-popup-request') {
     return null;
   }
+  if (code === 'firebase/not-configured') {
+    return 'Cloud sync is not configured in this local build. Copy .env.example to .env.local with your VITE_FIREBASE_* values.';
+  }
   if (code === 'auth/popup-blocked') {
     return 'Sign-in popup was blocked by your browser. Please allow popups for this site and try again.';
   }
@@ -436,8 +439,13 @@ export class CloudSyncManager {
           },
         );
       } catch (err) {
-        this.status = 'error';
-        this.error = formatFriendlyError(err);
+        if (err?.code === 'firebase/not-configured') {
+          this.status = 'disconnected';
+          this.error = null;
+        } else {
+          this.status = 'error';
+          this.error = formatFriendlyError(err);
+        }
         this.emit();
       }
     }
