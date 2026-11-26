@@ -312,6 +312,7 @@ export class CloudSyncManager {
     this.storageAdapterDetach = null;
     this.initialized = false;
     this.authEpoch = 0;
+    this.localMutationSeq = 0;
     this.reconcilingUid = null;
     this.reconcilePromise = null;
 
@@ -498,10 +499,27 @@ export class CloudSyncManager {
     return fresh;
   }
 
+  scheduleFollowUpFlushIfNeeded() {
+    if (
+      !this.currentUser ||
+      !this.meta.dirty ||
+      this.status === 'conflict' ||
+      isBrowserOffline() ||
+      this.debounceTimer !== null
+    ) {
+      return;
+    }
+    this.debounceTimer = setTimeout(() => {
+      this.debounceTimer = null;
+      this.flushPendingSave().catch(() => {});
+    }, this.debounceMs);
+  }
+
   /**
    * Invoked automatically whenever the user saves an edit through `storageService.save(...)`.
    */
   handleLocalStateSaved(nextState) {
+    this.localMutationSeq += 1;
     this.latestLocalState = nextState;
     this.saveMeta({ dirty: true });
 
@@ -796,13 +814,20 @@ export class CloudSyncManager {
     await this.pushStateToCloud(stateToSave);
   }
 
-  async pushStateToCloud(rawState, { allowMissingRecreateRetry = true } = {}) {
+  async pushStateToCloud(
+    rawState,
+    { allowMissingRecreateRetry = true, pushedSeq = this.localMutationSeq } = {},
+  ) {
     if (!this.currentUser) return;
 
     if (this.inFlightPromise) {
       this.queuedFlushAfterFlight = true;
       await this.inFlightPromise;
       return;
+    }
+
+    if (pushedSeq === this.localMutationSeq) {
+      this.cancelDebounce();
     }
 
     const uid = this.currentUser.uid;
@@ -847,17 +872,25 @@ export class CloudSyncManager {
       try {
         await batch.commit();
         if (!this.isSessionCurrent(uid, startEpoch)) return;
+        const hasNewerLocalEdits = this.localMutationSeq !== pushedSeq;
         this.saveMeta({
           lastSyncedUid: uid,
           lastSyncedRev: nextRev,
           shareToken: activeShareToken,
           lastSyncedAt: new Date().toISOString(),
-          dirty: false,
+          dirty: hasNewerLocalEdits,
         });
         this.conflict = null;
-        this.status = 'synced';
+        this.status = hasNewerLocalEdits
+          ? isBrowserOffline()
+            ? 'offline'
+            : 'pending'
+          : 'synced';
         this.error = null;
         this.emit();
+        if (hasNewerLocalEdits) {
+          this.scheduleFollowUpFlushIfNeeded();
+        }
       } catch (err) {
         if (!this.isSessionCurrent(uid, startEpoch)) return;
         if (err?.code === 'permission-denied') {
@@ -1107,6 +1140,7 @@ export class CloudSyncManager {
 
     const uid = this.currentUser.uid;
     const startEpoch = this.authEpoch;
+    const pushedSeq = this.localMutationSeq;
     let effectiveState = validateTrackerState(
       currentLocalState || this.latestLocalState || this.storageSvc.load(),
     );
@@ -1128,7 +1162,7 @@ export class CloudSyncManager {
       const remoteState = validateTrackerState(JSON.parse(data.stateJson));
 
       if ((this.meta.lastSyncedRev || 0) !== baseRev) {
-        if (this.meta.dirty) {
+        if (this.meta.dirty || this.localMutationSeq !== pushedSeq) {
           this.status = 'conflict';
           this.conflict = {
             reason: 'rev-mismatch',
@@ -1185,16 +1219,24 @@ export class CloudSyncManager {
       throw new Error('Account session changed.');
     }
 
+    const hasNewerLocalEdits = this.localMutationSeq !== pushedSeq;
     this.saveMeta({
       lastSyncedUid: uid,
       lastSyncedRev: nextRev,
       shareToken: newToken,
       lastSyncedAt: new Date().toISOString(),
-      dirty: false,
+      dirty: hasNewerLocalEdits,
     });
-    this.status = 'synced';
+    this.status = hasNewerLocalEdits
+      ? isBrowserOffline()
+        ? 'offline'
+        : 'pending'
+      : 'synced';
     this.error = null;
     this.emit();
+    if (hasNewerLocalEdits) {
+      this.scheduleFollowUpFlushIfNeeded();
+    }
     return newToken;
   }
 
@@ -1219,6 +1261,7 @@ export class CloudSyncManager {
 
     const uid = this.currentUser.uid;
     const startEpoch = this.authEpoch;
+    const pushedSeq = this.localMutationSeq;
     let effectiveState = validateTrackerState(
       currentLocalState || this.latestLocalState || this.storageSvc.load(),
     );
@@ -1241,7 +1284,7 @@ export class CloudSyncManager {
     const remoteState = validateTrackerState(JSON.parse(data.stateJson));
 
     if ((this.meta.lastSyncedRev || 0) !== baseRev) {
-      if (this.meta.dirty) {
+      if (this.meta.dirty || this.localMutationSeq !== pushedSeq) {
         this.status = 'conflict';
         this.conflict = {
           reason: 'rev-mismatch',
@@ -1285,16 +1328,24 @@ export class CloudSyncManager {
     await batch.commit();
     if (!this.isSessionCurrent(uid, startEpoch)) return;
 
+    const hasNewerLocalEdits = this.localMutationSeq !== pushedSeq;
     this.saveMeta({
       lastSyncedUid: uid,
       lastSyncedRev: nextRev,
       shareToken: null,
       lastSyncedAt: new Date().toISOString(),
-      dirty: false,
+      dirty: hasNewerLocalEdits,
     });
-    this.status = 'synced';
+    this.status = hasNewerLocalEdits
+      ? isBrowserOffline()
+        ? 'offline'
+        : 'pending'
+      : 'synced';
     this.error = null;
     this.emit();
+    if (hasNewerLocalEdits) {
+      this.scheduleFollowUpFlushIfNeeded();
+    }
   }
 
   /**

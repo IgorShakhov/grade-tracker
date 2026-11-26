@@ -654,4 +654,72 @@ describe('CloudSyncManager & Firestore Security Rules Invariants (cloudSync.js)'
     expect(fbMock.docs.has('users/user-1')).toBe(false);
     mgr.stop();
   });
+
+  it('keeps dirty:true and flushes follow-up edit when user edits mid-batch.commit() (#10)', async () => {
+    const fbMock = createRulesEnforcingFirebaseMock();
+    let releaseFirstCommit = null;
+    let interceptNextCommit = false;
+    const origWriteBatch = fbMock.service.writeBatch;
+    fbMock.service.writeBatch = () => {
+      const batch = origWriteBatch();
+      const origCommit = batch.commit.bind(batch);
+      batch.commit = async () => {
+        if (interceptNextCommit) {
+          interceptNextCommit = false;
+          await new Promise((resolve) => {
+            releaseFirstCommit = resolve;
+          });
+        }
+        return origCommit();
+      };
+      return batch;
+    };
+
+    const mem = createMemoryStorage();
+    const storageSvc = new StorageService({ storage: mem });
+    const mgr = new CloudSyncManager({
+      firebaseFactory: () => fbMock.service,
+      storage: mem,
+      storageSvc,
+      debounceMs: 80,
+    });
+    mgr.start();
+
+    fbMock.setPopupUser({ uid: 'user-1', email: 's@example.com' });
+    await mgr.signInWithGoogle();
+    expect(fbMock.docs.get('users/user-1').rev).toBe(1);
+
+    // Trigger first save and pause its batch.commit() mid-flight
+    interceptNextCommit = true;
+    const editA = storageSvc.load();
+    editA.studentName = 'FIRST';
+    storageSvc.save(editA);
+    const inFlightFlush = mgr.flushPendingSave();
+
+    await new Promise((r) => setTimeout(r, 10));
+    expect(typeof releaseFirstCommit).toBe('function');
+
+    // User makes a second edit WHILE first commit is still in flight
+    const editB = storageSvc.load();
+    editB.studentName = 'EDIT-DURING-COMMIT';
+    storageSvc.save(editB);
+
+    // Complete first commit -> must NOT mark dirty:false or status:'synced' yet!
+    releaseFirstCommit();
+    await inFlightFlush;
+    expect(mgr.getSnapshot().dirty).toBe(true);
+    expect(mgr.getSnapshot().status).toBe('pending');
+    expect(JSON.parse(fbMock.docs.get('users/user-1').stateJson).studentName).toBe('FIRST');
+
+    // Calling syncNow (simulating window focus before debounce finishes) must push EDIT-DURING-COMMIT, NOT overwrite it!
+    await mgr.syncNow(storageSvc.load());
+    expect(mgr.getSnapshot().dirty).toBe(false);
+    expect(mgr.getSnapshot().status).toBe('synced');
+    expect(fbMock.docs.get('users/user-1').rev).toBe(3);
+    expect(
+      JSON.parse(fbMock.docs.get('users/user-1').stateJson).studentName,
+    ).toBe('EDIT-DURING-COMMIT');
+
+    mgr.stop();
+  });
 });
