@@ -15,10 +15,9 @@ This document tracks shipped milestones, upcoming features, and key technical de
 - **What-If Exam Simulator & Target Calculator**:
   - Toggleable simulator mode to test hypothetical marks without overwriting saved grades.
   - Per-course target dropdown calculating the exact average needed across remaining ungraded syllabus weight (`secured`, `achievable`, or `unreachable`).
-- **Local-First Persistence, Sharing & Export**:
+- **Local-First Persistence & Sharing**:
   - Automatic `localStorage` persistence via `StorageService` with strict schema validation.
   - Compressed URL-safe Read-Only Share Snapshot links (`#share=z1....` via `CompressionStream`).
-  - Full JSON backup export/import and UTF-8 BOM CSV export formatted for Microsoft Excel.
 - **GitHub Pages CI/CD**: Automated test + Vite build + Pages deployment workflow (`.github/workflows/deploy.yml`).
 
 ### Milestone 1.1 — Generic Configurability, Course Organization & Safety *(Shipped in PRs #1, #2, #5)*
@@ -36,15 +35,15 @@ This document tracks shipped milestones, upcoming features, and key technical de
 - **Full In-Memory What-If Sandbox Isolation (Issue #4 / PR #5)**:
   - Upgraded What-If Simulator to clone `sandboxState` on entry so editing *any* field (including already-graded assessments, blank assessments, weights, units, or hypothetical courses) stays strictly in memory and reverts 100% cleanly on exit without touching `localStorage`.
 
-### Milestone 2 — GitHub-Backed Multi-Device Cloud Sync (`localStorage` + `grade-data` Branch) *(Shipped)*
-- **Dedicated `grade-data` Branch Architecture (`src/services/githubSync.js`)**:
-  - Pairs instant offline-first `localStorage` with direct GitHub REST Contents API sync (`GET` / `PUT /repos/{owner}/{repo}/contents/data/{profileId}.json?ref=grade-data`).
-  - Storing anonymous profile files (`data/<profileId>.json`) on an orphan **`grade-data`** branch inside the same repository keeps `main` commit history strictly dedicated to application PRs, avoids triggering GitHub Actions Pages rebuilds on grade edits, and supports multiple profiles effortlessly.
-  - Uses GitHub's blob `sha` for optimistic concurrency control, auto-bootstraps the target data branch if absent on a fork, queues changes offline (`pendingSync`) and flushes automatically on reconnect, and surfaces a 1-click `SyncConflictModal` (`Keep This Device` vs `Load Cloud Version`) on concurrent multi-device edits.
-- **Cloud Sync Setup & Zero-Token Live View (`src/components/SyncModals.jsx`, `src/App.jsx`)**:
-  - Auto-infers `owner/repo` when hosted on GitHub Pages (`<owner>.github.io/<repo>`) and stores the Fine-Grained Personal Access Token exclusively in browser `localStorage`.
-  - Generates a permanent **Live Read-Only View Link** (`?profile=<profileId>`) that anyone can bookmark to view always-current grades straight from GitHub with zero token required, plus a 1-click `Connect Token to Edit` upgrade on secondary devices.
-- *(Optional Future Privacy Enhancement)*: Client-side `crypto.subtle` (`AES-GCM`) passphrase encryption can be layered onto `data/<profileId>.json` if encrypted payloads are ever desired, or a private repository can be entered in the Repository field at any time.
+### Milestone 2 — 1-Click Google Sign-In & Cloud Firestore Sync *(Shipped)*
+- **Architecture Pivot Decision (GitHub PAT → Firebase Auth + Cloud Firestore)**:
+  - Replaced the initial manual GitHub Fine-Grained Personal Access Token sync (`grade-data` branch) with **Google Sign-In (`signInWithPopup`) + Cloud Firestore** on the free Spark plan, and retired the `grade-data` branch + manual JSON/CSV file import/export UI to keep the app lean and effortless across devices.
+  - Eliminates manual token generation, cross-device token copying, and 30-day token expiration while keeping zero user data in the public GitHub repository.
+- **Hardened Security & Multi-Device Concurrency (`firestore.rules`, `src/services/cloudSync.js`)**:
+  - Owner-isolated `users/{uid}` documents (`allow list: if false`) enforcing exact schema keys, `< 300 KB` payload bounds, server-enforced commit timestamps (`updatedAt == request.time`), zero stored PII, and monotonic integer `rev` counters (`rev == 1` on create, `rev == resource.data.rev + 1` on update) with `SyncConflictModal` resolution.
+  - Shared-computer safety: Firestore uses `memoryLocalCache()` (no IndexedDB grade remnants on disk), Sign Out clears local `grade_tracker_v1` + Undo/Redo history, and `lastSyncedUid` prevents accidental cross-account uploads.
+- **Unified Sharing (`#view=<token>` Live Link + `#share=...` Snapshot)**:
+  - Signed-in users can enable, rotate, or turn off a 192-bit `base64url` **Live Auto-Updating Link** (`#view=<token>` with `<meta name="referrer" content="no-referrer" />`) backed by `shares/{token}` and bound 1-to-1 to `users/{uid}.shareToken` via `getAfter(...)` in a single atomic `writeBatch` (zero orphan share docs), alongside one-time compressed `#share=` snapshots.
 
 ---
 

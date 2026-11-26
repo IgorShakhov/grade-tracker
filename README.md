@@ -1,13 +1,13 @@
 # Grade Tracker
 
-A fast, offline-first academic grade and GPA tracker built with React and Vite. Track course assessments, simulate exam and course outcomes, calculate target grades on remaining coursework, and manage multi-term GPAs right in your browser.
+A fast, offline-first academic grade and GPA tracker built with React and Vite. Track course assessments, simulate exam and course outcomes, calculate target grades on remaining coursework, and sync courses across devices with 1-click Google Sign-In.
 
 ## For AI Coding Agents (Start Here)
 
 If you are an AI coding assistant (Antigravity, Cursor, Claude Code, Copilot, etc.) picking up this repository from any account or session, **bootstrap your context in this exact order before scanning source files**:
 
-1. **Read [`AGENTS.md`](AGENTS.md)** — Complete directory/module map, Vanilla CSS policy, grade calculation & rounding invariants, atomic Undo/Redo state design, What-If sandbox isolation, and destructive-action safety rules.
-2. **Read [`docs/ROADMAP.md`](docs/ROADMAP.md)** — Shipped milestones (`M1`, `M1.1`), upcoming roadmap (`M2` GitHub `grades.json` sync, `M3` sub-assessments & PWA, `M4` degree progress), and recorded architectural decisions.
+1. **Read [`AGENTS.md`](AGENTS.md)** — Complete directory/module map, Vanilla CSS policy, grade calculation & rounding invariants, atomic Undo/Redo state design, What-If sandbox isolation, destructive-action safety rules, and Firebase/Firestore security invariants.
+2. **Read [`docs/ROADMAP.md`](docs/ROADMAP.md)** — Shipped milestones (`M1`, `M1.1`, `M2` Google Sign-In + Firestore Cloud Sync), upcoming roadmap (`M3` sub-assessments & PWA, `M4` degree progress), and recorded architectural decisions.
 3. **Check Open GitHub Issues** — Run `gh issue list --state open` (if `gh` is authenticated) to inspect pending bug reports and feature requests.
 4. **Keep Context Alive** — Whenever you ship a PR that adds features, changes module structure, or updates roadmap scope, update [`AGENTS.md`](AGENTS.md) and/or [`docs/ROADMAP.md`](docs/ROADMAP.md) in the **same PR** so future sessions never encounter stale documentation.
 
@@ -22,9 +22,8 @@ If you are an AI coding assistant (Antigravity, Cursor, Claude Code, Copilot, et
 - **Undo / Redo & Safe Deletions**: Multi-step Undo/Redo history (`Ctrl/Cmd+Z` / `Ctrl/Cmd+Shift+Z`) paired with confirmation dialogs for term/course deletions and 2-click inline confirmation for assessment rows.
 - **Remaining-Weight Target Grade Calculator**: Select a desired target percentage to see the exact average required across remaining ungraded coursework.
 - **Configurable Grading Scale**: Supports standard 4.0 GPA scales and customizable percentage-to-GPA/letter-grade thresholds.
-- **GitHub Multi-Device Cloud Sync**: Optional 1-minute setup using a GitHub Fine-Grained Personal Access Token to auto-sync profiles (`data/<profileId>.json`) to a dedicated `grade-data` branch—plus zero-token **Live Read-Only View Links** (`?profile=<profileId>`).
-- **Compressed Read-Only Share Snapshot Links**: Generate compact, URL-encoded read-only snapshots to share progress across devices or with family and peers.
-- **JSON Backup & Excel UTF-8 CSV Export**: Export and restore full state snapshots as JSON, or download UTF-8 BOM CSV spreadsheets ready for Microsoft Excel.
+- **1-Click Google Cloud Sync (Firebase Auth + Firestore)**: Sign in with Google on any laptop, phone, or tablet to automatically keep courses synced across devices with automatic session refresh, offline local caching, multi-device conflict resolution, and safe sign-out cache clearing.
+- **Live Auto-Updating & Point-in-Time Share Links**: Share either an always-current read-only link (`#view=<token>`, revocable or rotatable anytime) or a self-contained compressed URL snapshot (`#share=...`).
 
 ## Local Development
 
@@ -52,10 +51,10 @@ Deployment to GitHub Pages is automated via [`.github/workflows/deploy.yml`](.gi
 2. In your GitHub repository, go to **Settings → Pages → Build and deployment → Source** and select **GitHub Actions**.
 3. Every push to `main` (or manual `workflow_dispatch` trigger) runs `npm ci`, `npm test`, and `npm run build`, then publishes `./dist` to GitHub Pages.
 
-## GitHub Multi-Device Sync (`grade-data` Branch)
+## Cloud Sync & Security Model
 
-Grade Tracker persists all state offline-first in `localStorage` via [`src/services/storage.js`](src/services/storage.js) and includes a built-in GitHub Contents API sync engine in [`src/services/githubSync.js`](src/services/githubSync.js):
+Grade Tracker combines instant offline-first `localStorage` ([`src/services/storage.js`](src/services/storage.js)) with Firebase Authentication (Google Sign-In) and Cloud Firestore ([`src/services/cloudSync.js`](src/services/cloudSync.js), [`firestore.rules`](firestore.rules)):
 
-- **Dedicated `grade-data` Branch**: Synced profiles are stored at `data/<profileId>.json` on an orphan `grade-data` branch so `main` stays 100% pure application code and grade edits never trigger GitHub Actions Pages rebuilds.
-- **One-Time Setup**: Click **Cloud Sync** in the header, generate or enter a `profileId`, and paste a GitHub Fine-Grained Personal Access Token scoped **only** to your `grade-tracker` repository with `Contents: Read and write` permission (stored only in browser `localStorage`).
-- **Zero-Token Live View**: Share or bookmark `https://<owner>.github.io/<repo>/?profile=<profileId>` to view always-current grades in read-only mode without needing a token.
+- **Zero Grade Data on GitHub**: The public GitHub repository hosts only static application code and the public Firebase web app identifier (`src/services/firebase.js`). All synced course data lives privately in Firestore (`users/{uid}`) and the local browser cache.
+- **Hardened Firestore Rules (`firestore.rules`)**: Per-user documents are strictly owner-only (`request.auth.uid == uid`, non-listable) with server-timestamp validation (`updatedAt == request.time`), monotonic revision counters (`rev`) to prevent stale multi-device overwrites, and zero stored PII (no email, name, or photo stored in Firestore).
+- **Revocable Live Read-Only Links (`#view=<token>`)**: Enabling a live link writes a 192-bit random token tied 1-to-1 to the owner's `shareToken` via `getAfter(...)` in a single atomic `writeBatch`. Tokens stay in the URL `#` fragment (`no-referrer` enforced in `index.html`) and can be rotated or turned off atomically at any time.

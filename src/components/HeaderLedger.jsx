@@ -1,27 +1,29 @@
 import { formatGpa, formatPercent, formatLastUpdated } from '../domain/calculations.js';
 
-function getSyncLabel(readOnlyMode, syncStatus) {
-  if (readOnlyMode === 'live-profile') {
-    return { text: 'Live Shared View (GitHub)', dotClass: 'status-synced' };
+function getSyncLabel(readOnlyMode, syncSnapshot) {
+  if (readOnlyMode === 'live-share') {
+    return { text: 'Live Shared View (Read-Only)', dotClass: 'status-synced' };
   }
   if (readOnlyMode === 'snapshot') {
     return { text: 'Read-Only Shared Snapshot', dotClass: 'status-synced' };
   }
-  switch (syncStatus) {
+
+  const status = syncSnapshot?.status;
+  switch (status) {
     case 'synced':
-      return { text: 'Synced to GitHub', dotClass: 'status-synced' };
+      return { text: 'Synced with Google', dotClass: 'status-synced' };
     case 'syncing':
       return { text: 'Syncing…', dotClass: 'status-syncing' };
     case 'pending':
-      return { text: 'Changes pending sync…', dotClass: 'status-pending' };
+      return { text: 'Saving to cloud…', dotClass: 'status-pending' };
     case 'offline':
       return { text: 'Offline · Saved locally', dotClass: 'status-offline' };
     case 'conflict':
       return { text: 'Sync conflict — click to resolve', dotClass: 'status-conflict' };
     case 'error':
-      return { text: 'Sync error — click to inspect', dotClass: 'status-error' };
+      return { text: 'Sync issue — click for details', dotClass: 'status-error' };
     default:
-      return { text: 'Local only · Set up Sync', dotClass: 'status-disconnected' };
+      return { text: 'Local only · Sign in to sync', dotClass: 'status-disconnected' };
   }
 }
 
@@ -30,7 +32,7 @@ export default function HeaderLedger({
   lastUpdated,
   readOnly,
   readOnlyMode,
-  syncStatus,
+  syncSnapshot,
   simMode,
   simCount,
   stats,
@@ -44,7 +46,6 @@ export default function HeaderLedger({
   onToggleSimMode,
   onOpenSync,
   onOpenShare,
-  onOpenData,
 }) {
   const { overall, termStats } = stats;
   const possessiveTitle =
@@ -52,7 +53,8 @@ export default function HeaderLedger({
       ? 'Grade Tracker'
       : "'s Grade Tracker";
 
-  const syncInfo = getSyncLabel(readOnlyMode, syncStatus);
+  const syncInfo = getSyncLabel(readOnlyMode, syncSnapshot);
+  const isSignedIn = Boolean(syncSnapshot?.user);
 
   return (
     <header className="site-header">
@@ -84,7 +86,7 @@ export default function HeaderLedger({
                   type="button"
                   className="sync-pill-btn"
                   onClick={onOpenSync}
-                  title="Configure GitHub multi-device sync"
+                  title="Google Account & Multi-Device Sync"
                 >
                   <span
                     className={`sync-indicator ${syncInfo.dotClass}`}
@@ -140,16 +142,7 @@ export default function HeaderLedger({
               className="btn"
               onClick={onOpenSync}
             >
-              Cloud Sync
-            </button>
-
-            <button
-              id="open-data-btn"
-              type="button"
-              className="btn"
-              onClick={onOpenData}
-            >
-              Import / Export
+              {isSignedIn ? 'Account' : 'Sign In'}
             </button>
 
             <button
@@ -158,7 +151,7 @@ export default function HeaderLedger({
               className="btn btn-primary"
               onClick={onOpenShare}
             >
-              Share Link
+              Share
             </button>
           </div>
         </div>

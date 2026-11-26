@@ -1,7 +1,31 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { DEFAULT_GRADE_SCALE } from '../domain/constants.js';
 
-export function ShareModal({ shareUrl, onClose, onCopy }) {
+export function ShareModal({
+  isSignedIn,
+  liveShareUrl,
+  snapshotUrl,
+  onEnableOrRotateLiveShare,
+  onDisableLiveShare,
+  onCopyUrl,
+  onOpenSignIn,
+  onClose,
+}) {
+  const [busy, setBusy] = useState(null);
+  const [error, setError] = useState('');
+
+  async function runShareOp(label, fn) {
+    setError('');
+    setBusy(label);
+    try {
+      await fn();
+    } catch (err) {
+      setError(err?.message || 'Could not update live share link.');
+    } finally {
+      setBusy(null);
+    }
+  }
+
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <div
@@ -12,7 +36,7 @@ export function ShareModal({ shareUrl, onClose, onCopy }) {
         onClick={(e) => e.stopPropagation()}
       >
         <div className="modal-header">
-          <h2 id="share-modal-title">Share Read-Only Snapshot Link</h2>
+          <h2 id="share-modal-title">Share Read-Only View</h2>
           <button
             type="button"
             className="modal-close"
@@ -24,186 +48,140 @@ export function ShareModal({ shareUrl, onClose, onCopy }) {
         </div>
 
         <div className="modal-body">
-          <p>
-            Anyone with this link can view a read-only snapshot of your current
-            courses and grades on any device without changing your saved data.
-          </p>
-
-          <div className="share-url-row">
-            <input
-              id="share-url-input"
-              type="text"
-              className="share-url-input"
-              value={shareUrl}
-              readOnly
-              onFocus={(e) => e.target.select()}
-            />
-            <button
-              id="copy-share-url-btn"
-              type="button"
-              className="btn btn-primary"
-              onClick={onCopy}
-            >
-              Copy Link
-            </button>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-export function DataModal({
-  readOnly,
-  onClose,
-  onExportJson,
-  onExportCsv,
-  onImportJsonFile,
-  onLoadSample,
-  onResetEmpty,
-}) {
-  const fileInputRef = useRef(null);
-  const [importError, setImportError] = useState('');
-
-  async function handleFileChange(e) {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    setImportError('');
-    try {
-      const text = await file.text();
-      onImportJsonFile(text);
-      onClose();
-    } catch (err) {
-      setImportError(err.message || 'Could not import JSON file.');
-    } finally {
-      e.target.value = '';
-    }
-  }
-
-  return (
-    <div className="modal-backdrop" onClick={onClose}>
-      <div
-        className="modal-panel"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="data-modal-title"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="modal-header">
-          <h2 id="data-modal-title">Backups, Export &amp; Templates</h2>
-          <button
-            type="button"
-            className="modal-close"
-            onClick={onClose}
-            aria-label="Close data dialog"
-          >
-            ×
-          </button>
-        </div>
-
-        <div className="modal-body">
-          <p>
-            Export your tracker for backup or Microsoft Excel, or import an existing{' '}
-            <code>.json</code> grade file.
-          </p>
-
-          {importError && (
-            <p style={{ color: 'var(--danger-fg)', fontWeight: 600 }}>{importError}</p>
+          {error && (
+            <p style={{ color: 'var(--danger-fg)', fontWeight: 600 }}>{error}</p>
           )}
 
-          <div className="data-actions-grid">
-            <div className="data-action-row">
-              <div className="data-action-info">
-                <strong>Export JSON Backup</strong>
-                <span>Full tracker state including all terms and custom scale</span>
-              </div>
-              <button
-                id="export-json-btn"
-                type="button"
-                className="btn btn-sm"
-                onClick={onExportJson}
-              >
-                Download .json
-              </button>
+          <div className="share-section-box">
+            <div className="share-section-head">
+              <strong>Live Auto-Updating Link</strong>
+              {liveShareUrl && <span className="share-badge-active">Active</span>}
             </div>
+            <p style={{ marginBottom: '0.65rem' }}>
+              Anyone with this link always sees your latest synced grades in
+              read-only mode — no sign-in required to view.
+            </p>
 
-            <div className="data-action-row">
-              <div className="data-action-info">
-                <strong>Export Spreadsheet CSV</strong>
-                <span>UTF-8 CSV formatted cleanly for Microsoft Excel</span>
-              </div>
+            {!isSignedIn ? (
               <button
-                id="export-csv-btn"
+                id="share-signin-prompt-btn"
                 type="button"
-                className="btn btn-sm"
-                onClick={onExportCsv}
+                className="btn btn-sm btn-primary"
+                onClick={() => {
+                  onClose();
+                  onOpenSignIn();
+                }}
               >
-                Download .csv
+                Sign in with Google to Enable Live Link
               </button>
-            </div>
-
-            {!readOnly && (
+            ) : liveShareUrl ? (
               <>
-                <div className="data-action-row">
-                  <div className="data-action-info">
-                    <strong>Import JSON File</strong>
-                    <span>Load a saved grade tracker JSON file</span>
-                  </div>
+                <div className="share-url-row" style={{ marginBottom: '0.5rem' }}>
                   <input
-                    ref={fileInputRef}
-                    type="file"
-                    accept=".json,application/json"
-                    style={{ display: 'none' }}
-                    onChange={handleFileChange}
+                    id="live-share-url-input"
+                    type="text"
+                    className="share-url-input"
+                    value={liveShareUrl}
+                    readOnly
+                    onFocus={(e) => e.target.select()}
                   />
                   <button
-                    id="import-json-btn"
+                    id="copy-live-share-btn"
                     type="button"
-                    className="btn btn-sm btn-primary"
-                    onClick={() => fileInputRef.current?.click()}
+                    className="btn btn-primary btn-sm"
+                    onClick={() =>
+                      onCopyUrl(liveShareUrl, 'Live read-only link copied.')
+                    }
                   >
-                    Choose .json
+                    Copy Live Link
                   </button>
                 </div>
-
-                <div className="data-action-row">
-                  <div className="data-action-info">
-                    <strong>Load Sample Courses</strong>
-                    <span>Reset to realistic example courses to explore features</span>
+                <div
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: '0.5rem',
+                    flexWrap: 'wrap',
+                  }}
+                >
+                  <span className="sync-field-hint">
+                    Rotating or turning off revokes future access via the current
+                    link.
+                  </span>
+                  <div style={{ display: 'flex', gap: '0.38rem' }}>
+                    <button
+                      id="rotate-live-share-btn"
+                      type="button"
+                      className="btn btn-sm"
+                      disabled={busy !== null}
+                      onClick={() =>
+                        runShareOp('rotate', () => onEnableOrRotateLiveShare(true))
+                      }
+                    >
+                      {busy === 'rotate' ? 'Rotating…' : 'Rotate Link'}
+                    </button>
+                    <button
+                      id="disable-live-share-btn"
+                      type="button"
+                      className="btn btn-sm"
+                      disabled={busy !== null}
+                      onClick={() => runShareOp('disable', onDisableLiveShare)}
+                    >
+                      {busy === 'disable' ? 'Turning off…' : 'Turn Off'}
+                    </button>
                   </div>
-                  <button
-                    id="load-sample-btn"
-                    type="button"
-                    className="btn btn-sm"
-                    onClick={() => {
-                      onLoadSample();
-                      onClose();
-                    }}
-                  >
-                    Load Sample
-                  </button>
-                </div>
-
-                <div className="data-action-row">
-                  <div className="data-action-info">
-                    <strong>Start Fresh (Blank Tracker)</strong>
-                    <span>Clear all courses and begin with one clean starter course</span>
-                  </div>
-                  <button
-                    id="reset-empty-btn"
-                    type="button"
-                    className="btn btn-sm"
-                    onClick={() => {
-                      onResetEmpty();
-                      onClose();
-                    }}
-                  >
-                    Start Fresh
-                  </button>
                 </div>
               </>
+            ) : (
+              <button
+                id="enable-live-share-btn"
+                type="button"
+                className="btn btn-primary btn-sm"
+                disabled={busy !== null}
+                onClick={() =>
+                  runShareOp('enable', () => onEnableOrRotateLiveShare(false))
+                }
+              >
+                {busy === 'enable' ? 'Creating link…' : 'Enable Live Read-Only Link'}
+              </button>
             )}
           </div>
+
+          {snapshotUrl && (
+            <div className="share-section-box" style={{ marginBottom: 0 }}>
+              <div className="share-section-head">
+                <strong>One-Time Point-in-Time Snapshot</strong>
+              </div>
+              <p style={{ marginBottom: '0.6rem' }}>
+                Self-contained URL frozen at your current grades right now (works
+                even without cloud sync).
+              </p>
+              <div className="share-url-row" style={{ marginBottom: 0 }}>
+                <input
+                  id="share-url-input"
+                  type="text"
+                  className="share-url-input"
+                  value={snapshotUrl}
+                  readOnly
+                  onFocus={(e) => e.target.select()}
+                />
+                <button
+                  id="copy-share-url-btn"
+                  type="button"
+                  className="btn btn-sm"
+                  onClick={() =>
+                    onCopyUrl(
+                      snapshotUrl,
+                      'Point-in-time snapshot link copied.',
+                    )
+                  }
+                >
+                  Copy Snapshot
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       </div>
     </div>
