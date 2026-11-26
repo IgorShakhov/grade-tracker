@@ -156,7 +156,10 @@ export function CloudSyncModal({
                       disabled={
                         busyAction !== null || syncSnapshot.status === 'syncing'
                       }
-                      onClick={() => runAction('sync', onSyncNow)}
+                      onClick={async () => {
+                        await runAction('sync', onSyncNow);
+                        setConfirmingUnsyncedSignOut(false);
+                      }}
                     >
                       {busyAction === 'sync' || syncSnapshot.status === 'syncing'
                         ? 'Syncing…'
@@ -175,7 +178,8 @@ export function CloudSyncModal({
                 </div>
               </div>
 
-              {confirmingUnsyncedSignOut && (
+              {confirmingUnsyncedSignOut &&
+                syncSnapshot.status !== 'synced' && (
                 <div
                   className="data-action-row"
                   style={{

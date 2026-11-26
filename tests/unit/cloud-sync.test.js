@@ -168,7 +168,10 @@ function createRulesEnforcingFirebaseMock() {
                   throw permissionDenied('users uid mismatch');
                 }
                 if (op.type === 'delete') {
-                  const oldToken = existing?.shareToken ?? null;
+                  if (!existing) {
+                    throw permissionDenied('users delete requires existing doc');
+                  }
+                  const oldToken = existing.shareToken ?? null;
                   if (oldToken !== null && afterDocs.has(`shares/${oldToken}`)) {
                     throw permissionDenied(
                       'users delete must also delete active shares/{oldToken}',
@@ -819,13 +822,8 @@ describe('CloudSyncManager & Firestore Security Rules Invariants (cloudSync.js)'
     expect(storageSvc1.load().terms[0].courses[0].code).toBe('PHYS201');
     mgr1.stop();
 
-    // 2. Fresh secondary device: untouched default sample (even with older timestamp & collapsed card) -> auto-pulls silently!
+    // 2. Fresh secondary device: untouched default sample folded via real storageSvc.save() (`dirty: true`!) -> auto-pulls silently!
     const mem2 = createMemoryStorage();
-    const untouchedSample = createInitialState();
-    untouchedSample.lastUpdated = '2025-01-01T00:00:00.000Z';
-    untouchedSample.terms[0].courses[0].collapsed = true;
-    mem2.setItem(STORAGE_KEY, JSON.stringify(untouchedSample));
-
     const storageSvc2 = new StorageService({ storage: mem2 });
     const mgr2 = new CloudSyncManager({
       firebaseFactory: () => fbMock.service,
@@ -833,6 +831,12 @@ describe('CloudSyncManager & Firestore Security Rules Invariants (cloudSync.js)'
       storageSvc: storageSvc2,
     });
     mgr2.start();
+
+    const untouchedFolded = storageSvc2.load();
+    untouchedFolded.terms[0].courses[0].collapsed = true;
+    storageSvc2.save(untouchedFolded, { touchTimestamp: false });
+    await Promise.resolve();
+    expect(mgr2.getSnapshot().dirty).toBe(true);
 
     const snap2 = await mgr2.signInWithGoogle();
     expect(snap2.status).toBe('synced');
