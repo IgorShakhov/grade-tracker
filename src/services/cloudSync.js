@@ -706,142 +706,172 @@ export class CloudSyncManager {
     this.error = null;
     this.emit();
 
-    const fb = this.firebaseFactory();
-    const userRef = fb.doc('users', uid);
-    const snap = await fb.getDoc(userRef);
+    try {
+      const fb = this.firebaseFactory();
+      const userRef = fb.doc('users', uid);
+      const snap = await fb.getDoc(userRef);
 
-    if (expectedEpoch !== this.authEpoch || this.currentUser?.uid !== uid) {
-      return;
-    }
-
-    const localState = this.latestLocalState || this.storageSvc.load();
-    const { lastSyncedUid, lastSyncedRev, dirty } = this.meta;
-    const isDifferentPreviousOwner =
-      Boolean(lastSyncedUid) && lastSyncedUid !== uid;
-
-    if (snap.exists()) {
-      const data = snap.data() || {};
-      const remoteRev =
-        typeof data.rev === 'number' && Number.isInteger(data.rev) ? data.rev : 1;
-      const remoteShareToken = isValidShareToken(data.shareToken)
-        ? data.shareToken.trim()
-        : null;
-      const remoteState = validateTrackerState(JSON.parse(data.stateJson));
-
-      // Case A: Local storage belonged to a DIFFERENT Google account -> never auto-upload!
-      if (isDifferentPreviousOwner) {
-        if (dirty) {
-          this.status = 'conflict';
-          this.conflict = {
-            reason: 'account-switch',
-            remoteState,
-            remoteRev,
-            remoteShareToken,
-          };
-          this.emit();
-          return;
-        }
-        this.saveMeta({
-          lastSyncedUid: uid,
-          lastSyncedRev: remoteRev,
-          shareToken: remoteShareToken,
-          lastSyncedAt: new Date().toISOString(),
-          dirty: false,
-        });
-        this.applyRemoteStateLocally(remoteState);
-        this.status = 'synced';
-        this.emit();
+      if (expectedEpoch !== this.authEpoch || this.currentUser?.uid !== uid) {
         return;
       }
 
-      // Case B: Never synced on this browser before (`lastSyncedUid === null`)
-      if (!lastSyncedUid) {
-        const hasCustomLocalData = !areTrackerStatesEquivalent(
-          localState,
-          createInitialState(),
-        );
-        const differsFromRemote = !areTrackerStatesEquivalent(localState, remoteState);
+      const localState = this.latestLocalState || this.storageSvc.load();
+      const { lastSyncedUid, lastSyncedRev, dirty } = this.meta;
+      const isDifferentPreviousOwner =
+        Boolean(lastSyncedUid) && lastSyncedUid !== uid;
 
-        if (hasCustomLocalData && differsFromRemote) {
-          this.status = 'conflict';
-          this.conflict = {
-            reason: 'initial-merge',
-            remoteState,
-            remoteRev,
-            remoteShareToken,
-          };
-          this.emit();
-          return;
-        }
-        this.saveMeta({
-          lastSyncedUid: uid,
-          lastSyncedRev: remoteRev,
-          shareToken: remoteShareToken,
-          lastSyncedAt: new Date().toISOString(),
-          dirty: false,
-        });
-        this.applyRemoteStateLocally(remoteState);
-        this.status = 'synced';
-        this.emit();
-        return;
-      }
+      if (snap.exists()) {
+        const data = snap.data() || {};
+        const remoteRev =
+          typeof data.rev === 'number' && Number.isInteger(data.rev) ? data.rev : 1;
+        const remoteShareToken = isValidShareToken(data.shareToken)
+          ? data.shareToken.trim()
+          : null;
+        const remoteState = validateTrackerState(JSON.parse(data.stateJson));
 
-      // Case C: Returning same user (`lastSyncedUid === uid`)
-      if (dirty) {
-        if (lastSyncedRev === remoteRev) {
+        // Case A: Local storage belonged to a DIFFERENT Google account -> never auto-upload!
+        if (isDifferentPreviousOwner) {
+          if (dirty) {
+            this.status = 'conflict';
+            this.conflict = {
+              reason: 'account-switch',
+              remoteState,
+              remoteRev,
+              remoteShareToken,
+            };
+            this.emit();
+            return;
+          }
           this.saveMeta({
             lastSyncedUid: uid,
             lastSyncedRev: remoteRev,
             shareToken: remoteShareToken,
+            lastSyncedAt: new Date().toISOString(),
+            dirty: false,
           });
-          await this.pushStateToCloud(localState);
+          this.applyRemoteStateLocally(remoteState);
+          this.status = 'synced';
+          this.emit();
           return;
         }
+
+        // Case B: Never synced on this browser before (`lastSyncedUid === null`)
+        if (!lastSyncedUid) {
+          const hasCustomLocalData = !areTrackerStatesEquivalent(
+            localState,
+            createInitialState(),
+          );
+          const differsFromRemote = !areTrackerStatesEquivalent(
+            localState,
+            remoteState,
+          );
+
+          if (hasCustomLocalData && differsFromRemote) {
+            this.status = 'conflict';
+            this.conflict = {
+              reason: 'initial-merge',
+              remoteState,
+              remoteRev,
+              remoteShareToken,
+            };
+            this.emit();
+            return;
+          }
+          this.saveMeta({
+            lastSyncedUid: uid,
+            lastSyncedRev: remoteRev,
+            shareToken: remoteShareToken,
+            lastSyncedAt: new Date().toISOString(),
+            dirty: false,
+          });
+          this.applyRemoteStateLocally(remoteState);
+          this.status = 'synced';
+          this.emit();
+          return;
+        }
+
+        // Case C: Returning same user (`lastSyncedUid === uid`)
+        if (dirty) {
+          if (lastSyncedRev === remoteRev) {
+            this.saveMeta({
+              lastSyncedUid: uid,
+              lastSyncedRev: remoteRev,
+              shareToken: remoteShareToken,
+            });
+            await this.pushStateToCloud(localState);
+            return;
+          }
+          this.status = 'conflict';
+          this.conflict = {
+            reason: 'rev-mismatch',
+            remoteState,
+            remoteRev,
+            remoteShareToken,
+          };
+          this.emit();
+          return;
+        }
+
+        this.saveMeta({
+          lastSyncedUid: uid,
+          lastSyncedRev: remoteRev,
+          shareToken: remoteShareToken,
+          lastSyncedAt: new Date().toISOString(),
+          dirty: false,
+        });
+        this.applyRemoteStateLocally(remoteState);
+        this.status = 'synced';
+        this.emit();
+        return;
+      }
+
+      // Cloud document `users/{uid}` does NOT exist!
+      if (isDifferentPreviousOwner) {
+        // Never auto-upload another user's leftover localStorage into a brand-new account (`E2`)
         this.status = 'conflict';
         this.conflict = {
-          reason: 'rev-mismatch',
-          remoteState,
-          remoteRev,
-          remoteShareToken,
+          reason: 'account-switch',
+          remoteState: null,
+          remoteRev: 0,
+          remoteShareToken: null,
         };
         this.emit();
         return;
       }
 
+      // Same account previously synced (`lastSyncedRev > 0`), meaning cloud data was deleted on another device (#15)
+      if (lastSyncedUid === uid && (lastSyncedRev || 0) > 0) {
+        this.status = 'conflict';
+        this.conflict = {
+          reason: 'remote-deleted',
+          remoteState: null,
+          remoteRev: 0,
+          remoteShareToken: null,
+        };
+        this.emit();
+        return;
+      }
+
+      // First-time cloud setup for this user -> create `users/{uid}` at `rev: 1`
       this.saveMeta({
         lastSyncedUid: uid,
-        lastSyncedRev: remoteRev,
-        shareToken: remoteShareToken,
-        lastSyncedAt: new Date().toISOString(),
-        dirty: false,
+        lastSyncedRev: 0,
+        shareToken: null,
       });
-      this.applyRemoteStateLocally(remoteState);
-      this.status = 'synced';
-      this.emit();
-      return;
+      await this.pushStateToCloud(localState);
+    } catch (err) {
+      if (expectedEpoch === this.authEpoch && this.currentUser?.uid === uid) {
+        if (isBrowserOffline() || err?.code === 'unavailable') {
+          this.status = 'offline';
+          this.error = null;
+        } else {
+          this.status = 'error';
+          this.error = formatFriendlyError(err);
+        }
+        this.emit();
+      }
+      throw err;
     }
-
-    // Cloud document `users/{uid}` does NOT exist yet!
-    if (isDifferentPreviousOwner) {
-      // Never auto-upload another user's leftover localStorage into a brand-new account (`E2`)
-      this.status = 'conflict';
-      this.conflict = {
-        reason: 'account-switch',
-        remoteState: null,
-        remoteRev: 0,
-        remoteShareToken: null,
-      };
-      this.emit();
-      return;
-    }
-
-    // First-time cloud setup for this user -> create `users/{uid}` at `rev: 1`
-    this.saveMeta({
-      lastSyncedUid: uid,
-      lastSyncedRev: 0,
-      shareToken: null,
-    });
-    await this.pushStateToCloud(localState);
   }
 
   async signInWithGoogle() {
@@ -856,11 +886,20 @@ export class CloudSyncManager {
       return this.getSnapshot();
     } catch (err) {
       const msg = formatFriendlyError(err);
+      const nextStatus = !this.currentUser
+        ? 'disconnected'
+        : isBrowserOffline() || err?.code === 'unavailable'
+          ? 'offline'
+          : 'error';
       if (msg) {
-        this.status = this.currentUser ? this.status : 'disconnected';
+        this.status = nextStatus;
         this.error = msg;
         this.emit();
         throw new Error(msg);
+      }
+      if (this.status === 'syncing' || !this.currentUser) {
+        this.status = nextStatus;
+        this.emit();
       }
       return this.getSnapshot();
     }
@@ -965,10 +1004,7 @@ export class CloudSyncManager {
     await this.pushStateToCloud(stateToSave, { pushedSeq });
   }
 
-  async pushStateToCloud(
-    rawState,
-    { allowMissingRecreateRetry = true, pushedSeq = this.localMutationSeq } = {},
-  ) {
+  async pushStateToCloud(rawState, { pushedSeq = this.localMutationSeq } = {}) {
     if (!this.currentUser) return;
 
     if (this.inFlightPromise) {
@@ -1067,13 +1103,16 @@ export class CloudSyncManager {
             this.emit();
             return;
           }
-          if (allowMissingRecreateRetry && (this.meta.lastSyncedRev || 0) > 0) {
-            this.saveMeta({ lastSyncedRev: 0, shareToken: null });
-            this.inFlightPromise = null;
-            await this.pushStateToCloud(validated, {
-              allowMissingRecreateRetry: false,
-              pushedSeq,
-            });
+          if ((this.meta.lastSyncedRev || 0) > 0) {
+            this.status = 'conflict';
+            this.conflict = {
+              reason: 'remote-deleted',
+              remoteState: null,
+              remoteRev: 0,
+              remoteShareToken: null,
+            };
+            this.error = null;
+            this.emit();
             return;
           }
         }
@@ -1153,12 +1192,24 @@ export class CloudSyncManager {
       const localState = this.latestLocalState || this.storageSvc.load();
 
       if (!snap.exists()) {
+        if ((this.meta.lastSyncedRev || 0) > 0) {
+          this.status = 'conflict';
+          this.conflict = {
+            reason: 'remote-deleted',
+            remoteState: null,
+            remoteRev: 0,
+            remoteShareToken: null,
+          };
+          this.error = null;
+          this.emit();
+          return this.getSnapshot();
+        }
         this.saveMeta({
           lastSyncedUid: uid,
           lastSyncedRev: 0,
           shareToken: null,
         });
-        await this.pushStateToCloud(localState, { allowMissingRecreateRetry: false });
+        await this.pushStateToCloud(localState);
         return this.getSnapshot();
       }
 
@@ -1226,13 +1277,25 @@ export class CloudSyncManager {
    * Resolves a sync conflict (`'use-remote'` or `'keep-local'`).
    */
   async resolveConflict(strategy, currentLocalState) {
-    if (!this.currentUser || !this.conflict) return;
+    await Promise.resolve();
+    while (this.inFlightPromise) {
+      await this.inFlightPromise.catch(() => {});
+    }
+    if (!this.currentUser || !this.conflict) {
+      return this.getSnapshot();
+    }
     const uid = this.currentUser.uid;
+    const startEpoch = this.authEpoch;
     const activeConflict = this.conflict;
+    const prevMeta = { ...this.meta };
 
     if (strategy === 'use-remote') {
-      this.conflict = null;
+      if (activeConflict.reason === 'remote-deleted') {
+        await this.signOutUser({ forceDiscard: true });
+        return this.getSnapshot();
+      }
       if (activeConflict.remoteState) {
+        this.conflict = null;
         this.saveMeta({
           lastSyncedUid: uid,
           lastSyncedRev: activeConflict.remoteRev,
@@ -1244,32 +1307,69 @@ export class CloudSyncManager {
         this.status = 'synced';
         this.error = null;
         this.emit();
-      } else {
-        // New account on shared computer chose to discard previous user's local courses & start fresh
-        const fresh = this.resetLocalTrackerClean();
-        this.saveMeta({
-          lastSyncedUid: uid,
-          lastSyncedRev: 0,
-          shareToken: null,
-          dirty: false,
-        });
-        await this.pushStateToCloud(fresh);
+        return this.getSnapshot();
       }
-      return;
-    }
 
-    if (strategy === 'keep-local') {
-      const chosenLocal =
-        currentLocalState || this.latestLocalState || this.storageSvc.load();
+      // New account on shared computer chose to discard previous user's local courses & start fresh
+      const fresh = createInitialState();
       this.conflict = null;
       this.saveMeta({
         lastSyncedUid: uid,
-        lastSyncedRev: activeConflict.remoteRev || 0,
-        shareToken: activeConflict.remoteShareToken || null,
+        lastSyncedRev: 0,
+        shareToken: null,
         dirty: true,
       });
-      await this.pushStateToCloud(chosenLocal);
+      try {
+        await this.pushStateToCloud(fresh);
+        if (this.isSessionCurrent(uid, startEpoch) && this.status !== 'conflict') {
+          this.applyRemoteStateLocally(fresh);
+        }
+        return this.getSnapshot();
+      } catch (err) {
+        if (this.isSessionCurrent(uid, startEpoch) && this.status !== 'conflict') {
+          this.saveMeta(prevMeta);
+          this.conflict = activeConflict;
+          this.status = 'conflict';
+          this.emit();
+        }
+        throw new Error(formatFriendlyError(err) || 'Could not resolve sync conflict.');
+      }
     }
+
+    if (strategy === 'keep-local') {
+      const chosenLocal = validateTrackerState(
+        currentLocalState || this.latestLocalState || this.storageSvc.load(),
+      );
+      this.latestLocalState = chosenLocal;
+      this.storageSvc.saveLocalOnly(chosenLocal);
+      this.conflict = null;
+      this.saveMeta({
+        lastSyncedUid: uid,
+        lastSyncedRev:
+          activeConflict.reason === 'remote-deleted'
+            ? 0
+            : activeConflict.remoteRev || 0,
+        shareToken:
+          activeConflict.reason === 'remote-deleted'
+            ? null
+            : activeConflict.remoteShareToken || null,
+        dirty: true,
+      });
+      try {
+        await this.pushStateToCloud(chosenLocal);
+        return this.getSnapshot();
+      } catch (err) {
+        if (this.isSessionCurrent(uid, startEpoch) && this.status !== 'conflict') {
+          this.saveMeta(prevMeta);
+          this.conflict = activeConflict;
+          this.status = 'conflict';
+          this.emit();
+        }
+        throw new Error(formatFriendlyError(err) || 'Could not resolve sync conflict.');
+      }
+    }
+
+    return this.getSnapshot();
   }
 
   /**
@@ -1335,6 +1435,19 @@ export class CloudSyncManager {
           }
           effectiveState = this.applyRemoteStateLocally(remoteState);
         }
+      } else if ((this.meta.lastSyncedRev || 0) > 0) {
+        this.status = 'conflict';
+        this.conflict = {
+          reason: 'remote-deleted',
+          remoteState: null,
+          remoteRev: 0,
+          remoteShareToken: null,
+        };
+        this.error = null;
+        this.emit();
+        throw new Error(
+          'Saved cloud courses were deleted on another device. Please resolve the sync prompt first.',
+        );
       }
 
       const stateJson = JSON.stringify(effectiveState);
@@ -1452,6 +1565,20 @@ export class CloudSyncManager {
       const userSnap = await fb.getDoc(userRef);
       if (!this.isSessionCurrent(uid, startEpoch)) return;
       if (!userSnap.exists()) {
+        if ((this.meta.lastSyncedRev || 0) > 0) {
+          this.status = 'conflict';
+          this.conflict = {
+            reason: 'remote-deleted',
+            remoteState: null,
+            remoteRev: 0,
+            remoteShareToken: null,
+          };
+          this.error = null;
+          this.emit();
+          throw new Error(
+            'Saved cloud courses were deleted on another device. Please resolve the sync prompt first.',
+          );
+        }
         this.saveMeta({ shareToken: null });
         this.emit();
         return;
@@ -1554,45 +1681,67 @@ export class CloudSyncManager {
    * signs out, and wipes local browser storage (`E7`).
    */
   async deleteCloudData() {
+    await Promise.resolve();
     if (!this.currentUser) return;
     this.cancelDebounce();
     if (this.reconcilePromise) {
       await this.reconcilePromise.catch(() => {});
     }
-    if (this.inFlightPromise) {
+    while (this.inFlightPromise) {
       await this.inFlightPromise.catch(() => {});
     }
     if (!this.currentUser) return;
 
     const uid = this.currentUser.uid;
-    const fb = this.firebaseFactory();
-    const userRef = fb.doc('users', uid);
-    const userSnap = await fb.getDoc(userRef);
+    const startEpoch = this.authEpoch;
 
-    const batch = fb.writeBatch();
-    let hasDeletes = false;
+    const run = async () => {
+      if (!this.isSessionCurrent(uid, startEpoch)) return false;
+      const fb = this.firebaseFactory();
+      const userRef = fb.doc('users', uid);
+      const userSnap = await fb.getDoc(userRef);
+      if (!this.isSessionCurrent(uid, startEpoch)) return false;
 
-    if (userSnap.exists()) {
-      const data = userSnap.data() || {};
-      const token = isValidShareToken(data.shareToken)
-        ? data.shareToken.trim()
-        : this.meta.shareToken;
-      if (token) {
-        const shareSnap = await fb.getDoc(fb.doc('shares', token));
-        if (shareSnap.exists() && shareSnap.data()?.ownerUid === uid) {
-          batch.delete(fb.doc('shares', token));
-          hasDeletes = true;
+      const batch = fb.writeBatch();
+      let hasDeletes = false;
+
+      if (userSnap.exists()) {
+        const data = userSnap.data() || {};
+        const token = isValidShareToken(data.shareToken)
+          ? data.shareToken.trim()
+          : this.meta.shareToken;
+        if (token) {
+          const shareSnap = await fb.getDoc(fb.doc('shares', token));
+          if (!this.isSessionCurrent(uid, startEpoch)) return false;
+          if (shareSnap.exists() && shareSnap.data()?.ownerUid === uid) {
+            batch.delete(fb.doc('shares', token));
+            hasDeletes = true;
+          }
         }
+        batch.delete(userRef);
+        hasDeletes = true;
       }
-      batch.delete(userRef);
-      hasDeletes = true;
+
+      if (hasDeletes) {
+        await batch.commit();
+        if (!this.isSessionCurrent(uid, startEpoch)) return false;
+      }
+      return true;
+    };
+
+    this.inFlightPromise = run();
+    let shouldSignOut = false;
+    try {
+      shouldSignOut = await this.inFlightPromise;
+    } catch (err) {
+      throw new Error(formatFriendlyError(err) || 'Could not delete cloud data.');
+    } finally {
+      this.inFlightPromise = null;
     }
 
-    if (hasDeletes) {
-      await batch.commit();
+    if (shouldSignOut && this.isSessionCurrent(uid, startEpoch)) {
+      await this.signOutUser({ forceDiscard: true });
     }
-
-    await this.signOutUser({ forceDiscard: true });
   }
 }
 

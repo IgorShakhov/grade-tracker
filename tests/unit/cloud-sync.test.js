@@ -28,8 +28,8 @@ const SERVER_TS_SENTINEL = Symbol('serverTimestamp');
  *  - `shares/{token}`: public `get` for valid 22..64 token, `getAfter` verifying
  *    `users/{uid}.shareToken == token`, `ownerUid == auth.uid`, non-null `resource` on `delete`.
  */
-function createRulesEnforcingFirebaseMock() {
-  const docs = new Map();
+function createRulesEnforcingFirebaseMock(sharedDocs = new Map()) {
+  const docs = sharedDocs;
   let currentAuthUser = null;
   const authListeners = new Set();
 
@@ -901,4 +901,152 @@ describe('CloudSyncManager & Firestore Security Rules Invariants (cloudSync.js)'
     tab1.stop();
     tab2.stop();
   });
+
+  it('transitions out of syncing when reconcileOnSignIn fails so Sync Now stays usable (#15)', async () => {
+    const fbMock = createRulesEnforcingFirebaseMock();
+    const mem = createMemoryStorage();
+    const storageSvc = new StorageService({ storage: mem });
+    const mgr = new CloudSyncManager({
+      firebaseFactory: () => fbMock.service,
+      storage: mem,
+      storageSvc,
+    });
+    mgr.start();
+
+    const origGetDoc = fbMock.service.getDoc;
+    let failGetDoc = true;
+    fbMock.service.getDoc = async (ref) => {
+      if (failGetDoc) {
+        const err = new Error('Firestore unreachable');
+        err.code = 'unavailable';
+        throw err;
+      }
+      return origGetDoc(ref);
+    };
+
+    fbMock.setPopupUser({ uid: 'user-1', email: 's@example.com' });
+    await expect(mgr.signInWithGoogle()).rejects.toThrow(/Network unavailable/i);
+    expect(mgr.getSnapshot().user?.uid).toBe('user-1');
+    expect(mgr.getSnapshot().status).toBe('offline');
+    expect(mgr.getSnapshot().status).not.toBe('syncing');
+
+    // Once network recovers, manual syncNow completes initial setup cleanly
+    failGetDoc = false;
+    const recovered = await mgr.syncNow(storageSvc.load());
+    expect(recovered.status).toBe('synced');
+    expect(fbMock.docs.get('users/user-1').rev).toBe(1);
+
+    mgr.stop();
+  });
+
+  it('raises remote-deleted conflict instead of silently recreating cloud doc when erased on another device, and guards deleteCloudData session epochs (#15)', async () => {
+    const sharedDocs = new Map();
+    const fbDev1 = createRulesEnforcingFirebaseMock(sharedDocs);
+    const fbDev2 = createRulesEnforcingFirebaseMock(sharedDocs);
+
+    // Device 1 & Device 2 have independent browser Auth sessions sharing Firestore `sharedDocs`
+    const mem1 = createMemoryStorage();
+    const svc1 = new StorageService({ storage: mem1 });
+    const dev1 = new CloudSyncManager({
+      firebaseFactory: () => fbDev1.service,
+      storage: mem1,
+      storageSvc: svc1,
+    });
+
+    const mem2 = createMemoryStorage();
+    const svc2 = new StorageService({ storage: mem2 });
+    const dev2 = new CloudSyncManager({
+      firebaseFactory: () => fbDev2.service,
+      storage: mem2,
+      storageSvc: svc2,
+    });
+    dev1.start();
+    dev2.start();
+
+    fbDev1.setPopupUser({ uid: 'user-1', email: 's@example.com' });
+    await dev1.signInWithGoogle();
+    const custom = svc1.load();
+    custom.studentName = 'Synced Before Erase';
+    svc1.save(custom);
+    await dev1.flushPendingSave();
+    expect(sharedDocs.get('users/user-1').rev).toBe(2);
+
+    fbDev2.setPopupUser({ uid: 'user-1', email: 's@example.com' });
+    await dev2.signInWithGoogle();
+    expect(dev2.getSnapshot().rev).toBe(2);
+    expect(svc2.load().studentName).toBe('Synced Before Erase');
+
+    // Device 1 runs Delete Cloud Data -> erases users/user-1 and signs out Device 1 ONLY
+    await dev1.deleteCloudData();
+    expect(sharedDocs.has('users/user-1')).toBe(false);
+    expect(dev2.getSnapshot().user?.uid).toBe('user-1');
+
+    // 1. Device 2 edits a grade and flushes -> MUST raise `remote-deleted` conflict instead of recreating at rev 1!
+    const editOnDev2 = svc2.load();
+    editOnDev2.studentName = 'Edited After Remote Erase';
+    svc2.save(editOnDev2);
+    await dev2.flushPendingSave();
+
+    expect(sharedDocs.has('users/user-1')).toBe(false);
+    expect(dev2.getSnapshot().status).toBe('conflict');
+    expect(dev2.getSnapshot().conflict?.reason).toBe('remote-deleted');
+
+    // Verify resolveConflict keeps modal conflict state intact if push throws (e.g. quota error)
+    const origBatch = fbDev2.service.writeBatch;
+    fbDev2.service.writeBatch = () => {
+      const b = origBatch();
+      b.commit = async () => {
+        const err = new Error('Quota');
+        err.code = 'resource-exhausted';
+        throw err;
+      };
+      return b;
+    };
+    await expect(
+      dev2.resolveConflict('keep-local', svc2.load()),
+    ).rejects.toThrow(/quota/i);
+    expect(dev2.getSnapshot().status).toBe('conflict');
+    expect(dev2.getSnapshot().conflict?.reason).toBe('remote-deleted');
+    fbDev2.service.writeBatch = origBatch;
+
+    // 2. Choosing 'keep-local' ('Re-Upload Courses') explicitly recreates users/user-1 at rev 1!
+    const reuploaded = await dev2.resolveConflict('keep-local', svc2.load());
+    expect(reuploaded.status).toBe('synced');
+    expect(sharedDocs.get('users/user-1').rev).toBe(1);
+    expect(
+      JSON.parse(sharedDocs.get('users/user-1').stateJson).studentName,
+    ).toBe('Edited After Remote Erase');
+
+    // 3. Delete cloud doc again externally & verify syncNow() + 'use-remote' ('Sign Out & Clear')
+    sharedDocs.delete('users/user-1');
+    const syncSnap = await dev2.syncNow(svc2.load());
+    expect(syncSnap.status).toBe('conflict');
+    expect(syncSnap.conflict?.reason).toBe('remote-deleted');
+
+    const cleared = await dev2.resolveConflict('use-remote', svc2.load());
+    expect(cleared.user).toBeNull();
+    expect(cleared.status).toBe('disconnected');
+    expect(svc2.load().studentName).toBe('My');
+
+    // 4. Verify deleteCloudData aborts if session epoch changes during getDoc
+    fbDev2.setPopupUser({ uid: 'user-1', email: 's@example.com' });
+    await dev2.signInWithGoogle();
+    expect(sharedDocs.has('users/user-1')).toBe(true);
+
+    const origGetDoc = fbDev2.service.getDoc;
+    fbDev2.service.getDoc = async (ref) => {
+      const res = await origGetDoc(ref);
+      // Simulate session change mid-flight
+      dev2.authEpoch += 1;
+      return res;
+    };
+    await dev2.deleteCloudData();
+    fbDev2.service.getDoc = origGetDoc;
+    // Cloud doc must NOT have been deleted when session epoch changed!
+    expect(sharedDocs.has('users/user-1')).toBe(true);
+
+    dev1.stop();
+    dev2.stop();
+  });
 });
+

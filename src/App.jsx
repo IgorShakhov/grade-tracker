@@ -509,8 +509,10 @@ export default function App() {
     const snap = await cloudSyncManager.signInWithGoogle();
     if (snap.user) {
       setShowSyncModal(false);
-      if (snap.status !== 'conflict') {
+      if (snap.status === 'synced') {
         showToast('Signed in with Google and synced courses.');
+      } else if (snap.status === 'offline' || snap.status === 'pending') {
+        showToast('Signed in — courses will sync when back online.');
       }
     }
   }
@@ -535,6 +537,9 @@ export default function App() {
 
   async function handleDeleteCloudData() {
     await cloudSyncManager.deleteCloudData();
+    if (cloudSyncManager.getSnapshot().user) {
+      return;
+    }
     lastCoalesceRef.current = { key: null, time: 0 };
     setSandboxState(null);
     setDoc((prev) => ({
@@ -1129,8 +1134,12 @@ export default function App() {
           onSignIn={handleSignInGoogle}
           onSignOut={handleSignOutGoogle}
           onSyncNow={async () => {
-            await cloudSyncManager.syncNow(stateRef.current);
-            showToast('Synced with Google Cloud.');
+            const snap = await cloudSyncManager.syncNow(stateRef.current);
+            if (snap?.status === 'conflict') {
+              setShowSyncModal(false);
+            } else if (snap?.status === 'synced') {
+              showToast('Synced with Google Cloud.');
+            }
           }}
           onDeleteCloudData={handleDeleteCloudData}
           onClose={() => setShowSyncModal(false)}
@@ -1144,18 +1153,26 @@ export default function App() {
             conflict={syncSnapshot.conflict}
             localState={state}
             onKeepLocal={async () => {
-              await cloudSyncManager.resolveConflict(
+              const snap = await cloudSyncManager.resolveConflict(
                 'keep-local',
                 stateRef.current,
               );
-              showToast('Saved local courses to Google Cloud.');
+              if (snap?.status === 'synced') {
+                showToast('Saved local courses to Google Cloud.');
+              } else if (snap?.status === 'offline' || snap?.status === 'pending') {
+                showToast(
+                  'Saved locally — will sync to Google Cloud when back online.',
+                );
+              }
             }}
             onUseRemote={async () => {
+              const reason = syncSnapshot.conflict?.reason;
               const hadRemote = Boolean(syncSnapshot.conflict?.remoteState);
-              await cloudSyncManager.resolveConflict(
+              const snap = await cloudSyncManager.resolveConflict(
                 'use-remote',
                 stateRef.current,
               );
+              lastCoalesceRef.current = { key: null, time: 0 };
               setSandboxState(null);
               setDoc((prev) => ({
                 current: storageService.load(),
@@ -1163,11 +1180,17 @@ export default function App() {
                 future: [],
                 localSaveSeq: prev.localSaveSeq || 0,
               }));
-              showToast(
-                hadRemote
-                  ? 'Loaded courses from Google Cloud.'
-                  : 'Started clean tracker for this account.',
-              );
+              if (reason === 'remote-deleted' || !snap?.user) {
+                showToast('Signed out and cleared local cached grades.');
+              } else if (hadRemote) {
+                showToast('Loaded courses from Google Cloud.');
+              } else if (snap?.status === 'offline' || snap?.status === 'pending') {
+                showToast(
+                  'Started clean tracker locally — will sync when back online.',
+                );
+              } else if (snap?.status === 'synced') {
+                showToast('Started clean tracker for this account.');
+              }
             }}
             onClose={() => setConflictDismissed(true)}
           />
