@@ -1,0 +1,63 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() { return request.auth != null; }
+    function validToken(t) { return t is string && t.matches('^[A-Za-z0-9_-]{22,64}$'); }
+    function validState(d) {
+      return d.stateJson is string
+          && d.stateJson.size() < 300000
+          && d.updatedAt == request.time;
+    }
+    function validOptionalShareToken(d) {
+      return !('shareToken' in d)
+          || d.shareToken == null
+          || validToken(d.shareToken);
+    }
+
+    match /users/{uid} {
+      allow get, delete: if signedIn() && request.auth.uid == uid;
+      allow list: if false;
+
+      allow create: if signedIn() && request.auth.uid == uid
+        && request.resource.data.keys().hasAll(['stateJson', 'updatedAt', 'rev'])
+        && request.resource.data.keys().hasOnly(['stateJson', 'updatedAt', 'rev', 'shareToken'])
+        && validState(request.resource.data)
+        && request.resource.data.rev is int
+        && request.resource.data.rev == 1
+        && validOptionalShareToken(request.resource.data);
+
+      allow update: if signedIn() && request.auth.uid == uid
+        && request.resource.data.keys().hasAll(['stateJson', 'updatedAt', 'rev'])
+        && request.resource.data.keys().hasOnly(['stateJson', 'updatedAt', 'rev', 'shareToken'])
+        && validState(request.resource.data)
+        && request.resource.data.rev is int
+        && request.resource.data.rev == resource.data.rev + 1
+        && validOptionalShareToken(request.resource.data);
+    }
+
+    match /shares/{token} {
+      allow get: if validToken(token);
+      allow list: if false;
+
+      allow create: if signedIn() && validToken(token)
+        && request.resource.data.keys().hasAll(['ownerUid', 'stateJson', 'updatedAt'])
+        && request.resource.data.keys().hasOnly(['ownerUid', 'stateJson', 'updatedAt'])
+        && request.resource.data.ownerUid == request.auth.uid
+        && validState(request.resource.data)
+        && getAfter(/databases/$(database)/documents/users/$(request.auth.uid)).data.shareToken == token;
+
+      allow update: if signedIn() && validToken(token)
+        && resource.data.ownerUid == request.auth.uid
+        && request.resource.data.keys().hasAll(['ownerUid', 'stateJson', 'updatedAt'])
+        && request.resource.data.keys().hasOnly(['ownerUid', 'stateJson', 'updatedAt'])
+        && request.resource.data.ownerUid == request.auth.uid
+        && validState(request.resource.data)
+        && getAfter(/databases/$(database)/documents/users/$(request.auth.uid)).data.shareToken == token;
+
+      allow delete: if signedIn() && resource.data.ownerUid == request.auth.uid;
+    }
+
+    match /{document=**} { allow read, write: if false; }
+  }
+}

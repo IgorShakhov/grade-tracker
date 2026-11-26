@@ -1,19 +1,42 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { render, screen, within, fireEvent } from '@testing-library/react';
+
+// Mock Firebase service layer so React UI tests never open network sockets
+vi.mock('../../src/services/firebase.js', () => ({
+  FIREBASE_CONFIG: { projectId: 'test-project' },
+  getFirebaseServices: () => ({
+    onAuthStateChanged: (cb) => {
+      cb(null);
+      return () => {};
+    },
+    signInWithGooglePopup: vi.fn().mockResolvedValue({ user: null }),
+    signOutAuth: vi.fn().mockResolvedValue(undefined),
+    doc: (...segments) => ({ path: segments.join('/'), segments }),
+    getDoc: vi.fn().mockResolvedValue({ exists: () => false, data: () => undefined }),
+    writeBatch: () => ({
+      set: vi.fn(),
+      delete: vi.fn(),
+      commit: vi.fn().mockResolvedValue(undefined),
+    }),
+    serverTimestamp: () => 'mock-ts',
+  }),
+}));
+
 import App from '../../src/App.jsx';
 
-describe('Grade Tracker React Application (M1 + M1.1 + Undo/Redo & Confirmations)', () => {
+describe('Grade Tracker React Application (M1 + M1.1 + Firebase Cloud Sync)', () => {
   beforeEach(() => {
     window.localStorage.clear();
     window.history.replaceState({}, '', '/');
   });
 
-  it('renders generic initial tracker with sample courses, GPA metrics, and grading scale', () => {
+  it('renders generic initial tracker with sample courses, GPA metrics, grading scale, and no Import/Export clutter', () => {
     render(<App />);
     expect(screen.getByLabelText('Tracker owner or label')).toHaveValue('My');
     expect(screen.getByText('Grading Scale')).toBeInTheDocument();
     expect(screen.getByText('Cumulative GPA')).toBeInTheDocument();
     expect(screen.getByDisplayValue('ECON101')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Import \/ Export/i })).not.toBeInTheDocument();
   });
 
   it('supports collapsing and expanding individual and all courses (M1.1)', () => {
@@ -102,7 +125,6 @@ describe('Grade Tracker React Application (M1 + M1.1 + Undo/Redo & Confirmations
     const table = within(ecoSection).getByRole('table');
     const firstRowDelete = within(table).getAllByRole('button', { name: /^Delete /i })[0];
 
-    // First click reveals "Delete?" inline confirmation without deleting row yet
     fireEvent.click(firstRowDelete);
     const confirmChip = within(table).getByRole('button', { name: /^Confirm delete /i });
     expect(confirmChip).toHaveTextContent('Delete?');
@@ -111,7 +133,6 @@ describe('Grade Tracker React Application (M1 + M1.1 + Undo/Redo & Confirmations
     fireEvent.click(confirmChip);
     expect(within(table).getAllByRole('row').length).toBe(rowsBefore - 1);
 
-    // Undo restores the assessment row
     fireEvent.click(screen.getByRole('button', { name: /↶ Undo/i }));
     expect(within(table).getAllByRole('row').length).toBe(rowsBefore);
   });
@@ -120,12 +141,10 @@ describe('Grade Tracker React Application (M1 + M1.1 + Undo/Redo & Confirmations
     render(<App />);
     const savedBefore = window.localStorage.getItem('grade_tracker_v1');
 
-    // Grab ECON101's already-graded first row and ungraded Final Exam row before entering What-If
     const ecoBefore = screen.getByRole('region', { name: 'Course ECON101' });
     const firstGradeBefore = within(ecoBefore).getAllByLabelText(/ECON101 .* grade percent/i)[0].value;
     expect(firstGradeBefore).not.toBe('');
 
-    // Enter What-If Simulator
     fireEvent.click(screen.getByRole('button', { name: /What-If Simulator/i }));
     expect(screen.getByText(/What-If Exam Simulator ON/i)).toBeInTheDocument();
 
@@ -134,7 +153,6 @@ describe('Grade Tracker React Application (M1 + M1.1 + Undo/Redo & Confirmations
     const gradedInput = simGradeInputs[0];
     const blankInput = simGradeInputs.find((el) => el.value === '');
 
-    // Change BOTH an already-graded assessment AND a blank ungraded assessment
     fireEvent.focus(gradedInput);
     fireEvent.change(gradedInput, { target: { value: '12.50' } });
     fireEvent.blur(gradedInput);
@@ -144,10 +162,8 @@ describe('Grade Tracker React Application (M1 + M1.1 + Undo/Redo & Confirmations
     fireEvent.blur(blankInput);
 
     expect(screen.getByRole('button', { name: /Reset Simulation \(2\)/i })).toBeInTheDocument();
-    // Saved localStorage must remain completely untouched while simulating
     expect(window.localStorage.getItem('grade_tracker_v1')).toBe(savedBefore);
 
-    // Exit What-If Simulator -> ALL values must snap back to original saved state
     fireEvent.click(screen.getByRole('button', { name: /Exit Simulator/i }));
     expect(screen.queryByText(/What-If Exam Simulator ON/i)).not.toBeInTheDocument();
 
@@ -158,14 +174,17 @@ describe('Grade Tracker React Application (M1 + M1.1 + Undo/Redo & Confirmations
     expect(window.localStorage.getItem('grade_tracker_v1')).toBe(savedBefore);
   });
 
-  it('opens the GitHub Cloud Sync configuration dialog from the toolbar and validates required fields (Milestone 2)', () => {
+  it('opens the 1-click Google Sign-In dialog and the unified Share dialog (Milestone 2)', async () => {
     render(<App />);
-    fireEvent.click(screen.getByRole('button', { name: /Cloud Sync/i }));
-    const dialog = screen.getByRole('dialog', { name: /GitHub Cloud Sync/i });
-    expect(dialog).toBeInTheDocument();
-    expect(within(dialog).getByLabelText(/Data Branch/i)).toHaveValue('grade-data');
 
-    fireEvent.click(within(dialog).getByRole('button', { name: /Connect & Sync/i }));
-    expect(within(dialog).getByText(/Enter a valid GitHub repository/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /^Sign In$/i }));
+    const syncDialog = screen.getByRole('dialog', { name: /Sign In to Sync/i });
+    expect(within(syncDialog).getByRole('button', { name: /Sign in with Google/i })).toBeInTheDocument();
+    fireEvent.click(within(syncDialog).getByRole('button', { name: /^Close$/i }));
+
+    fireEvent.click(screen.getByRole('button', { name: /^Share$/i }));
+    const shareDialog = await screen.findByRole('dialog', { name: /Share Read-Only View/i });
+    expect(within(shareDialog).getByText(/Live Auto-Updating Link/i)).toBeInTheDocument();
+    expect(within(shareDialog).getByText(/One-Time Point-in-Time Snapshot/i)).toBeInTheDocument();
   });
 });

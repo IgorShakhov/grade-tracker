@@ -6,11 +6,11 @@ Read this file and [`docs/ROADMAP.md`](docs/ROADMAP.md) first before modifying t
 
 ## 1. Project Overview
 
-**Grade Tracker** is a static, offline-first course grade and GPA web application deployed on GitHub Pages.
+**Grade Tracker** is a static, offline-first course grade and GPA web application deployed on GitHub Pages with 1-click Google Sign-In and Cloud Firestore multi-device sync.
 
-- **Stack**: React 19 + Vite (`base: './'`) + Vanilla CSS + Vitest (`jsdom` + `@testing-library/react`).
+- **Stack**: React 19 + Vite (`base: './'`) + Firebase Modular SDK (`firebase/app`, `firebase/auth`, `firebase/firestore/lite`) + Vanilla CSS + Vitest (`jsdom` + `@testing-library/react`).
 - **Styling Policy**: Pure Vanilla CSS in `src/styles/index.css` using curated HSL custom properties and `Plus Jakarta Sans` + `JetBrains Mono` (`tabular-nums`). Do **not** introduce TailwindCSS or CSS-in-JS libraries unless explicitly requested.
-- **Privacy & Generic Repo Policy**: Because this repository is public (to support GitHub Free Pages), keep **zero** personal names or university-specific identifiers in source code, default templates, tests, commit messages, or docs. Personal/institution customizations belong in user-configurable settings or synced `grade-data` profiles.
+- **Privacy & Generic Repo Policy**: Because this repository is public (to support GitHub Free Pages), keep **zero** personal names or university-specific identifiers in source code, default templates, tests, commit messages, or docs. All real course data lives exclusively in per-user Firestore documents (`users/{uid}`) and local browser storage.
 
 ---
 
@@ -18,11 +18,12 @@ Read this file and [`docs/ROADMAP.md`](docs/ROADMAP.md) first before modifying t
 
 ```text
 .
-├── index.html                        # Entry HTML, Google Fonts, SVG icon
+├── index.html                        # Entry HTML, no-referrer policy, Google Fonts, SVG icon
+├── firestore.rules                   # Hardened Firestore v2 security rules (users/{uid} & shares/{token})
 ├── vite.config.js                    # Vite build (base: './') + Vitest jsdom config
 ├── src/
 │   ├── main.jsx                      # React 19 StrictMode root
-│   ├── App.jsx                       # Top-level state, Undo/Redo, What-If sandbox, Cloud Sync & ?profile= viewer
+│   ├── App.jsx                       # Top-level state, Undo/Redo, What-If sandbox, Google Cloud Sync & #view/#share viewer
 │   ├── domain/
 │   │   ├── constants.js              # STORAGE_KEY, DEFAULT_GRADE_SCALE, UNIT_OPTIONS, TARGET_PRESETS
 │   │   ├── templates.js              # createInitialState, createEmptyState, course/term factories
@@ -30,25 +31,25 @@ Read this file and [`docs/ROADMAP.md`](docs/ROADMAP.md) first before modifying t
 │   │   └── operations.js             # Pure immutable helpers: reorder, moveCourseToTerm, duplicateCourseInTerm, collapseAll
 │   ├── services/
 │   │   ├── storage.js                # validateTrackerState, StorageService (localStorage + registerCloudAdapter hook)
-│   │   ├── githubSync.js             # GitHubSyncManager: GitHub REST Contents API sync on branch 'grade-data' + sha conflict resolution
-│   │   ├── share.js                  # CompressionStream ('z1.') / base64url ('u1.') read-only URL snapshot codec
-│   │   └── exporters.js              # JSON import/export & UTF-8 BOM RFC-4180 Excel CSV exporter
+│   │   ├── firebase.js               # Public firebaseConfig + lazy Auth (Google popup) & stateless Firestore Lite init
+│   │   ├── cloudSync.js              # CloudSyncManager: Google Auth, atomic writeBatch sync, rev concurrency, #view shares
+│   │   └── share.js                  # CompressionStream ('z1.') / base64url ('u1.') point-in-time URL snapshot codec
 │   ├── components/
-│   │   ├── HeaderLedger.jsx          # Owner input, Sync status pill, Undo/Redo, What-If, Cloud Sync, Share, Import/Export
+│   │   ├── HeaderLedger.jsx          # Owner input, Sync status pill, Undo/Redo, What-If, Sign In / Account, Share
 │   │   ├── TermTabs.jsx              # Multi-term tabs, inline rename, delete trigger, Collapse/Expand All
 │   │   ├── CourseCard.jsx            # Collapsible/draggable course sheet, inline numeric cells, 2-click row delete, target bar
 │   │   ├── GradeScaleCard.jsx        # Sticky Grading Scale reference + Customize trigger
-│   │   ├── Modals.jsx                # ShareModal, DataModal, ScaleEditorModal, ConfirmDeleteModal
-│   │   └── SyncModals.jsx            # CloudSyncModal (profile setup + live link) & SyncConflictModal
+│   │   ├── Modals.jsx                # Unified ShareModal (Live #view Link + Static Snapshot), ScaleEditorModal, ConfirmDeleteModal
+│   │   └── SyncModals.jsx            # CloudSyncModal (Google Sign-In, Sync Now, Sign Out, Delete Cloud Data) & SyncConflictModal
 │   └── styles/
 │       └── index.css                 # Complete Vanilla CSS design system, responsive breakpoints, @media print
 ├── tests/unit/
 │   ├── calculations.test.js          # Weighted math, rounding, custom scales, Pass/Fail, target edge cases
 │   ├── share.test.js                 # Compressed URL snapshot round-trips & malformed token safety
-│   ├── storage-export.test.js        # Schema validation, migrations, cloud adapter hooks, JSON/CSV export
-│   ├── github-sync.test.js           # Mocked-fetch GitHub Contents API sync, branch creation, offline queue, sha conflicts
+│   ├── storage.test.js               # Schema validation, migrations, cloud adapter hooks
+│   ├── cloud-sync.test.js            # Rules-enforcing Firestore mock: Google auth, rev conflicts, share rotation, account isolation
 │   ├── operations.test.js            # Reorder, duplicate, move-to-term, collapse helpers
-│   └── app.test.jsx                  # React integration tests (M1 + M1.1 + Undo/Redo + What-If sandbox + Cloud Sync UI)
+│   └── app.test.jsx                  # React integration tests (M1 + M1.1 + Undo/Redo + What-If sandbox + Sign-In & Share UI)
 └── .github/
     ├── workflows/deploy.yml          # CI/CD: npm ci -> npm test -> npm run build -> deploy ./dist to GitHub Pages
     └── ISSUE_TEMPLATE/               # Structured Bug Report & Feature Request forms
@@ -71,7 +72,7 @@ Read this file and [`docs/ROADMAP.md`](docs/ROADMAP.md) first before modifying t
 
 3. **What-If Simulator Sandbox Isolation (`src/App.jsx`)**:
    - Entering What-If Simulator clones the current base state into an in-memory `sandboxState` (`structuredClone(baseState)`).
-   - While `sandboxState !== null`, **all** mutations update **only** `sandboxState` — never calling `storageService.save()`, never triggering GitHub Cloud Sync pushes, and never pushing onto real Undo/Redo history.
+   - While `sandboxState !== null`, **all** mutations update **only** `sandboxState` — never calling `storageService.save()`, never triggering Firestore writes, and never pushing onto real Undo/Redo history.
    - Exiting What-If sets `sandboxState = null` (with `<CourseCard key={...-sim|live} />` remounting cleanly) so 100% of saved values revert immediately.
 
 4. **Destructive Action Safety**:
@@ -79,10 +80,12 @@ Read this file and [`docs/ROADMAP.md`](docs/ROADMAP.md) first before modifying t
    - Deleting an **Assessment Row** uses inline 2-step confirmation (`×` → `Delete?`) inside `CourseCard.jsx`.
    - Every confirmed deletion pushes onto the Undo stack and surfaces an inline `Undo` action in the toast notification.
 
-5. **GitHub Cloud Sync & Dedicated `grade-data` Branch (`src/services/githubSync.js`)**:
-   - `GitHubSyncManager` plugs into `storageService.registerCloudAdapter(...)` and stores anonymous profile files at `data/<profileId>.json` on the orphan **`grade-data`** branch (never on `main`, keeping `main` git history purely code PRs and avoiding unnecessary GitHub Actions Pages rebuilds).
-   - Fine-Grained Personal Access Tokens live **only** in browser `localStorage` (`grade_tracker_cloud_sync_v1`) and are never serialized into `TrackerState`, JSON exports, or share URLs.
-   - Opening `?profile=<profileId>` loads `data/<profileId>.json` directly from GitHub's Contents API in Live Read-Only View (zero token needed for public repos), unless the current browser is already authenticated to edit that profile.
+5. **Firebase Google Sign-In, Firestore Rules & Security Invariants (`src/services/cloudSync.js`, `firestore.rules`)**:
+   - **Auth Flow**: Always use `signInWithPopup` (never `signInWithRedirect`, which breaks on `github.io` vs `firebaseapp.com` due to browser third-party storage partitioning).
+   - **Zero PII & Stateless Firestore Lite**: Uses `firebase/firestore/lite` so zero IndexedDB grade copies persist on disk (`E3`). Never write `email`, `displayName`, or `photoURL` to Firestore or `localStorage` — `users/{uid}` stores only `{ stateJson, updatedAt, rev, shareToken }`.
+   - **Optimistic Concurrency (`rev`) & Atomic Share Sync**: Every cloud save runs in a single `writeBatch` incrementing `rev` by `+1` (`rev == 1` on create, `rev == resource.data.rev + 1` on update) with `updatedAt: serverTimestamp()`, updating `shares/{shareToken}` in the same batch when live sharing is active. Rotating or disabling a live share link deletes `shares/{oldToken}` in the same `writeBatch` (`getAfter` enforces 1-to-1 binding).
+   - **Shared-Computer Account Isolation**: `grade_tracker_sync_meta_v1` tracks `lastSyncedUid`. Signing out wipes `grade_tracker_v1`, sync metadata, and React's Undo/Redo stack. If a different Google account signs in over leftover local edits, `CloudSyncManager` never auto-uploads — it prompts with a safe default to load/start clean for the new account.
+   - **XSS & Origin Boundary**: Never use `dangerouslySetInnerHTML`. Every remote `stateJson` (both `users/{uid}` and `shares/{token}`) must pass `validateTrackerState` before entering React state. Note that all GitHub Pages apps under `<owner>.github.io/*` share one browser origin, so never deploy untrusted third-party JS under the same GitHub Pages account.
 
 ---
 

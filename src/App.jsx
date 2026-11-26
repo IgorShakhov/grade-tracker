@@ -1,8 +1,6 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { DEFAULT_GRADE_SCALE } from './domain/constants.js';
 import {
-  createInitialState,
-  createEmptyState,
   createNewTerm,
   createNewCourse,
   createNewCategory,
@@ -25,16 +23,12 @@ import {
   clearShareParamsFromCurrentUrl,
 } from './services/share.js';
 import {
-  parseImportedJson,
-  exportStateAsJson,
-  exportStateAsCsv,
-} from './services/exporters.js';
-import {
-  githubSyncManager,
-  extractLiveProfileParams,
-  clearLiveProfileParamsFromUrl,
-  fetchRemoteProfile,
-} from './services/githubSync.js';
+  cloudSyncManager,
+  buildLiveShareUrl,
+  extractLiveViewTokenFromUrl,
+  clearLiveViewFromUrl,
+  fetchSharedView,
+} from './services/cloudSync.js';
 
 import HeaderLedger from './components/HeaderLedger.jsx';
 import TermTabs from './components/TermTabs.jsx';
@@ -42,7 +36,6 @@ import CourseCard from './components/CourseCard.jsx';
 import GradeScaleCard from './components/GradeScaleCard.jsx';
 import {
   ShareModal,
-  DataModal,
   ScaleEditorModal,
   ConfirmDeleteModal,
 } from './components/Modals.jsx';
@@ -128,19 +121,18 @@ export default function App() {
   const lastCoalesceRef = useRef({ key: null, time: 0 });
 
   const [syncSnapshot, setSyncSnapshot] = useState(() =>
-    githubSyncManager.getSnapshot(),
+    cloudSyncManager.getSnapshot(),
   );
   const [sharedState, setSharedState] = useState(null);
-  const [liveProfileMeta, setLiveProfileMeta] = useState(null);
+  const [liveShareTokenView, setLiveShareTokenView] = useState(null);
   const [liveRefreshing, setLiveRefreshing] = useState(false);
 
   // When non-null, What-If Simulator is active and isolates all edits in memory
   const [sandboxState, setSandboxState] = useState(null);
-  const [shareModalUrl, setShareModalUrl] = useState(null);
-  const [showDataModal, setShowDataModal] = useState(false);
+  const [showShareModal, setShowShareModal] = useState(false);
+  const [snapshotShareUrl, setSnapshotShareUrl] = useState('');
   const [showScaleModal, setShowScaleModal] = useState(false);
   const [showSyncModal, setShowSyncModal] = useState(false);
-  const [syncModalPrefill, setSyncModalPrefill] = useState(null);
   const [conflictDismissed, setConflictDismissed] = useState(false);
   const [pendingDelete, setPendingDelete] = useState(null);
   const [dragIndex, setDragIndex] = useState(null);
@@ -158,34 +150,23 @@ export default function App() {
     return () => clearTimeout(t);
   }, [toast]);
 
-  // Subscribe to GitHubSyncManager status updates and remote state pushes
+  // Start CloudSyncManager and subscribe to sync + remote storage updates
   useEffect(() => {
-    const unsubSync = githubSyncManager.subscribe((nextSnap) => {
+    const unsubStorage = storageService.subscribe((remoteState) => {
+      setDoc((prev) => ({ ...prev, current: remoteState }));
+    });
+    const unsubSync = cloudSyncManager.subscribe((nextSnap) => {
       setSyncSnapshot(nextSnap);
       if (nextSnap.status !== 'conflict') {
         setConflictDismissed(false);
       }
     });
-    const unsubStorage = storageService.subscribe((remoteState) => {
-      setDoc((prev) => ({ ...prev, current: remoteState }));
-    });
-    return () => {
-      unsubSync();
-      unsubStorage();
-    };
-  }, []);
-
-  // Auto-sync on mount, window focus, and network reconnect when Cloud Sync is enabled
-  useEffect(() => {
-    const snap = githubSyncManager.getSnapshot();
-    if (snap.config?.enabled && snap.config?.token) {
-      githubSyncManager.syncNow(stateRef.current).catch(() => {});
-    }
+    const stopSync = cloudSyncManager.start();
 
     function handleOnlineOrFocus() {
-      const cur = githubSyncManager.getSnapshot();
-      if (cur.config?.enabled && cur.config?.token) {
-        githubSyncManager.syncNow(stateRef.current).catch(() => {});
+      const cur = cloudSyncManager.getSnapshot();
+      if (cur.user && cur.status !== 'conflict' && cur.status !== 'syncing') {
+        cloudSyncManager.syncNow(stateRef.current).catch(() => {});
       }
     }
 
@@ -194,56 +175,59 @@ export default function App() {
     return () => {
       window.removeEventListener('online', handleOnlineOrFocus);
       window.removeEventListener('focus', handleOnlineOrFocus);
+      unsubSync();
+      unsubStorage();
+      stopSync();
     };
   }, []);
 
-  // Check URL for either ?profile=<id> (Live GitHub Read-Only View) or #share=... (Compressed Snapshot)
+  // Check URL for either `#view=<token>` (Live Read-Only Cloud Share) or `#share=...` (Compressed Snapshot)
   useEffect(() => {
     let cancelled = false;
+
     async function checkUrlViewMode() {
       if (typeof window === 'undefined') return;
 
-      const liveParams = extractLiveProfileParams(window.location);
-      if (liveParams && liveParams.repo) {
-        const currentCfg = githubSyncManager.getSnapshot().config;
-        const isSameEditableProfile =
-          currentCfg?.enabled &&
-          currentCfg?.token &&
-          currentCfg.profileId === liveParams.profileId &&
-          currentCfg.repo.toLowerCase() === liveParams.repo.toLowerCase();
+      const viewToken = extractLiveViewTokenFromUrl(window.location);
+      if (viewToken) {
+        // Normalize any legacy `?view=` query parameter into `#view=` fragment to avoid Referer/log exposure
+        if (window.location.search.includes('view=')) {
+          const normalized = buildLiveShareUrl(window.location.href, viewToken);
+          if (normalized && typeof window.history?.replaceState === 'function') {
+            const parsed = new URL(normalized);
+            window.history.replaceState(
+              window.history.state ?? null,
+              '',
+              `${parsed.pathname}${parsed.hash}`,
+            );
+          }
+        }
 
-        if (!isSameEditableProfile) {
-          try {
-            const remote = await fetchRemoteProfile({
-              repo: liveParams.repo,
-              branch: liveParams.branch,
-              profileId: liveParams.profileId,
-            });
-            if (!cancelled) {
-              if (remote.exists && remote.state) {
-                setLiveProfileMeta(liveParams);
-                setSharedState(remote.state);
-              } else {
-                showToast(
-                  `Profile "${liveParams.profileId}" was not found on ${liveParams.repo}.`,
-                );
-              }
-            }
-          } catch (err) {
-            if (!cancelled) {
-              showToast(err.message || 'Could not fetch live profile from GitHub.');
+        try {
+          const remote = await fetchSharedView(viewToken);
+          if (!cancelled) {
+            if (remote.exists && remote.state) {
+              setLiveShareTokenView(viewToken);
+              setSharedState(remote.state);
+            } else {
+              clearLiveViewFromUrl(window);
+              showToast('This shared link is no longer active or was rotated.');
             }
           }
-          return;
+        } catch (err) {
+          if (!cancelled) {
+            showToast(err?.message || 'Could not load shared tracker.');
+          }
         }
+        return;
       }
 
-      const token = extractShareTokenFromUrl(window.location);
-      if (!token) return;
-      const decoded = await decodeShareSnapshot(token);
+      const snapToken = extractShareTokenFromUrl(window.location);
+      if (!snapToken) return;
+      const decoded = await decodeShareSnapshot(snapToken);
       if (!cancelled) {
         if (decoded) {
-          setLiveProfileMeta(null);
+          setLiveShareTokenView(null);
           setSharedState(decoded);
         } else {
           showToast(
@@ -252,20 +236,23 @@ export default function App() {
         }
       }
     }
+
     checkUrlViewMode();
+    window.addEventListener('hashchange', checkUrlViewMode);
     return () => {
       cancelled = true;
+      window.removeEventListener('hashchange', checkUrlViewMode);
     };
   }, [showToast]);
 
   const isSharedReadOnly = Boolean(sharedState);
   const readOnlyMode = isSharedReadOnly
-    ? liveProfileMeta
-      ? 'live-profile'
+    ? liveShareTokenView
+      ? 'live-share'
       : 'snapshot'
     : null;
   const simMode = sandboxState !== null;
-  // In What-If Sandbox mode, allow testing edits even on a shared snapshot (in memory only)
+  // In What-If Sandbox mode, allow testing edits even on a shared view (in memory only)
   const readOnly = isSharedReadOnly && !simMode;
   const baseState = sharedState || state;
   const activeState = sandboxState || baseState;
@@ -411,30 +398,28 @@ export default function App() {
   const allCollapsed =
     allCoursesInTerm.length > 0 && allCoursesInTerm.every((c) => Boolean(c.collapsed));
 
-  // --- Shared / Live Profile View Handlers ---
+  // --- Shared / Live View Handlers ---
   function handleExitSharedView() {
     clearShareParamsFromCurrentUrl(window);
-    clearLiveProfileParamsFromUrl(window);
+    clearLiveViewFromUrl(window);
     setSandboxState(null);
-    setLiveProfileMeta(null);
+    setLiveShareTokenView(null);
     setSharedState(null);
   }
 
-  async function handleRefreshLiveProfile() {
-    if (!liveProfileMeta) return;
+  async function handleRefreshLiveShare() {
+    if (!liveShareTokenView) return;
     setLiveRefreshing(true);
     try {
-      const remote = await fetchRemoteProfile({
-        repo: liveProfileMeta.repo,
-        branch: liveProfileMeta.branch,
-        profileId: liveProfileMeta.profileId,
-      });
+      const remote = await fetchSharedView(liveShareTokenView);
       if (remote.exists && remote.state) {
         setSharedState(remote.state);
-        showToast('Refreshed latest grades from GitHub.');
+        showToast('Refreshed latest shared grades.');
+      } else {
+        showToast('This shared link was turned off or rotated.');
       }
     } catch (err) {
-      showToast(err.message || 'Could not refresh profile.');
+      showToast(err?.message || 'Could not refresh shared grades.');
     } finally {
       setLiveRefreshing(false);
     }
@@ -450,41 +435,55 @@ export default function App() {
       future: [],
     }));
     clearShareParamsFromCurrentUrl(window);
-    clearLiveProfileParamsFromUrl(window);
-    setLiveProfileMeta(null);
+    clearLiveViewFromUrl(window);
+    setLiveShareTokenView(null);
     setSharedState(null);
-    showToast('Saved shared courses into your local tracker.');
+    showToast('Saved shared courses into your tracker.');
   }
 
-  // --- Cloud Sync Handlers ---
+  // --- Cloud Sync & Auth Handlers ---
   function handleOpenSyncControl() {
     if (syncSnapshot.status === 'conflict') {
       setConflictDismissed(false);
       return;
     }
-    setSyncModalPrefill(liveProfileMeta || null);
     setShowSyncModal(true);
   }
 
-  async function handleConnectCloudSync(params) {
-    const result = await githubSyncManager.connect(params, stateRef.current);
-    // If we were viewing this exact profile in read-only ?profile= mode, switch to full editable mode!
-    if (liveProfileMeta && liveProfileMeta.profileId === params.profileId) {
-      setLiveProfileMeta(null);
-      setSharedState(null);
+  async function handleSignInGoogle() {
+    const snap = await cloudSyncManager.signInWithGoogle();
+    if (snap.user) {
+      setShowSyncModal(false);
+      if (snap.status !== 'conflict') {
+        showToast('Signed in with Google and synced courses.');
+      }
     }
-    setShowSyncModal(false);
-    setSyncModalPrefill(null);
-    showToast(
-      result.mode === 'pulled'
-        ? `Connected & loaded profile "${params.profileId}" from GitHub.`
-        : `Connected & created profile "${params.profileId}" on GitHub.`,
-    );
   }
 
-  function handleDisconnectCloudSync() {
-    githubSyncManager.disconnect();
-    showToast('Disconnected GitHub Cloud Sync on this device.');
+  async function handleSignOutGoogle() {
+    await cloudSyncManager.signOutUser();
+    lastCoalesceRef.current = { key: null, time: 0 };
+    setSandboxState(null);
+    setDoc({
+      current: storageService.load(),
+      past: [],
+      future: [],
+    });
+    setShowSyncModal(false);
+    showToast('Signed out and cleared local cached grades.');
+  }
+
+  async function handleDeleteCloudData() {
+    await cloudSyncManager.deleteCloudData();
+    lastCoalesceRef.current = { key: null, time: 0 };
+    setSandboxState(null);
+    setDoc({
+      current: storageService.load(),
+      past: [],
+      future: [],
+    });
+    setShowSyncModal(false);
+    showToast('Deleted cloud data and cleared local browser cache.');
   }
 
   async function handleCopyUrlText(urlText, label = 'Link copied to clipboard.') {
@@ -496,16 +495,22 @@ export default function App() {
     }
   }
 
-  // --- Share Link Generation (always shares saved baseState, not temporary What-If) ---
+  // --- Unified Share Modal ---
   async function handleOpenShareModal() {
     try {
       const token = await encodeShareSnapshot(baseState);
       const url = buildShareUrl(window.location.href, token);
-      setShareModalUrl(url);
+      setSnapshotShareUrl(url);
     } catch {
-      showToast('Could not generate share link.');
+      setSnapshotShareUrl('');
     }
+    setShowShareModal(true);
   }
+
+  const liveShareUrl =
+    typeof window !== 'undefined' && syncSnapshot.shareToken
+      ? buildLiveShareUrl(window.location.href, syncSnapshot.shareToken)
+      : '';
 
   // --- Term Mutations ---
   function handleSelectTerm(termId) {
@@ -775,15 +780,15 @@ export default function App() {
 
   return (
     <div className="app-root">
-      {/* Shared Snapshot or Live GitHub Profile Banner */}
+      {/* Shared Snapshot or Live Shared View Banner */}
       {isSharedReadOnly && (
         <div className="mode-banner" role="status">
           <div className="mode-banner-inner">
-            {liveProfileMeta ? (
+            {liveShareTokenView ? (
               <span>
-                Viewing <strong>Live GitHub Profile</strong> (
-                <code>{liveProfileMeta.profileId}</code>). Read-only unless you
-                connect a token or turn on What-If Simulator.
+                Viewing <strong>Live Shared Grade Tracker</strong> (
+                {baseState.studentName || 'Shared'}). Read-only — turn on What-If
+                Simulator to test hypothetical scores.
               </span>
             ) : (
               <span>
@@ -793,29 +798,16 @@ export default function App() {
               </span>
             )}
             <div className="mode-banner-actions">
-              {liveProfileMeta && (
-                <>
-                  <button
-                    id="refresh-live-profile-btn"
-                    type="button"
-                    className="btn btn-ghost-light"
-                    disabled={liveRefreshing}
-                    onClick={handleRefreshLiveProfile}
-                  >
-                    {liveRefreshing ? 'Refreshing…' : '↻ Refresh'}
-                  </button>
-                  <button
-                    id="connect-live-profile-btn"
-                    type="button"
-                    className="btn btn-ghost-light"
-                    onClick={() => {
-                      setSyncModalPrefill(liveProfileMeta);
-                      setShowSyncModal(true);
-                    }}
-                  >
-                    Connect Token to Edit
-                  </button>
-                </>
+              {liveShareTokenView && (
+                <button
+                  id="refresh-live-share-btn"
+                  type="button"
+                  className="btn btn-ghost-light"
+                  disabled={liveRefreshing}
+                  onClick={handleRefreshLiveShare}
+                >
+                  {liveRefreshing ? 'Refreshing…' : '↻ Refresh'}
+                </button>
               )}
               <button
                 id="save-shared-copy-btn"
@@ -831,7 +823,7 @@ export default function App() {
                 className="btn btn-ghost-light"
                 onClick={handleExitSharedView}
               >
-                Open My Local Tracker
+                Open My Tracker
               </button>
             </div>
           </div>
@@ -876,7 +868,7 @@ export default function App() {
         lastUpdated={activeState.lastUpdated}
         readOnly={readOnly}
         readOnlyMode={readOnlyMode}
-        syncStatus={syncSnapshot.status}
+        syncSnapshot={syncSnapshot}
         simMode={simMode}
         simCount={simCount}
         stats={stats}
@@ -895,7 +887,6 @@ export default function App() {
         onToggleSimMode={handleToggleSimMode}
         onOpenSync={handleOpenSyncControl}
         onOpenShare={handleOpenShareModal}
-        onOpenData={() => setShowDataModal(true)}
       />
 
       <main className="workspace-shell">
@@ -1044,96 +1035,81 @@ export default function App() {
         </div>
       </main>
 
-      {shareModalUrl && (
+      {showShareModal && (
         <ShareModal
-          shareUrl={shareModalUrl}
-          onClose={() => setShareModalUrl(null)}
-          onCopy={() =>
-            handleCopyUrlText(
-              shareModalUrl,
-              'Read-only snapshot link copied to clipboard.',
-            )
-          }
+          isSignedIn={Boolean(syncSnapshot.user)}
+          liveShareUrl={liveShareUrl}
+          snapshotUrl={snapshotShareUrl}
+          onEnableOrRotateLiveShare={async (isRotate) => {
+            const newToken = await cloudSyncManager.enableOrRotateShare(
+              stateRef.current,
+            );
+            const nextUrl = buildLiveShareUrl(window.location.href, newToken);
+            await handleCopyUrlText(
+              nextUrl,
+              isRotate
+                ? 'Rotated live link and copied new URL.'
+                : 'Enabled live read-only link and copied URL.',
+            );
+          }}
+          onDisableLiveShare={async () => {
+            await cloudSyncManager.disableShare(stateRef.current);
+            showToast('Turned off live read-only link.');
+          }}
+          onCopyUrl={handleCopyUrlText}
+          onOpenSignIn={() => setShowSyncModal(true)}
+          onClose={() => setShowShareModal(false)}
         />
       )}
 
       {showSyncModal && (
         <CloudSyncModal
           syncSnapshot={syncSnapshot}
-          initialPrefill={syncModalPrefill}
-          onConnect={handleConnectCloudSync}
-          onDisconnect={handleDisconnectCloudSync}
+          onSignIn={handleSignInGoogle}
+          onSignOut={handleSignOutGoogle}
           onSyncNow={async () => {
-            await githubSyncManager.syncNow(stateRef.current);
-            showToast('Synced with GitHub.');
+            await cloudSyncManager.syncNow(stateRef.current);
+            showToast('Synced with Google Cloud.');
           }}
-          onCopyLiveUrl={(urlText) =>
-            handleCopyUrlText(urlText, 'Live GitHub profile link copied.')
-          }
-          onClose={() => {
-            setShowSyncModal(false);
-            setSyncModalPrefill(null);
-          }}
+          onDeleteCloudData={handleDeleteCloudData}
+          onClose={() => setShowSyncModal(false)}
         />
       )}
 
-      {syncSnapshot.status === 'conflict' && !conflictDismissed && (
-        <SyncConflictModal
-          localState={state}
-          remoteState={syncSnapshot.conflictRemoteState}
-          onKeepLocal={async () => {
-            await githubSyncManager.resolveConflict('keep-local', stateRef.current);
-            showToast('Kept local changes and updated GitHub.');
-          }}
-          onUseRemote={async () => {
-            await githubSyncManager.resolveConflict('use-remote', stateRef.current);
-            showToast('Loaded latest version from GitHub.');
-          }}
-          onClose={() => setConflictDismissed(true)}
-        />
-      )}
-
-      {showDataModal && (
-        <DataModal
-          readOnly={isSharedReadOnly}
-          onClose={() => setShowDataModal(false)}
-          onExportJson={() => exportStateAsJson(baseState)}
-          onExportCsv={() => exportStateAsCsv(baseState)}
-          onImportJsonFile={(text) => {
-            const imported = parseImportedJson(text);
-            setSandboxState(null);
-            const saved = storageService.save(imported, { touchTimestamp: false });
-            setDoc((prev) => ({
-              current: saved,
-              past: [...prev.past.slice(-(MAX_HISTORY - 1)), prev.current],
-              future: [],
-            }));
-            showToast('Imported JSON tracker data.');
-          }}
-          onLoadSample={() => {
-            const sample = createInitialState();
-            setSandboxState(null);
-            const saved = storageService.save(sample, { touchTimestamp: true });
-            setDoc((prev) => ({
-              current: saved,
-              past: [...prev.past.slice(-(MAX_HISTORY - 1)), prev.current],
-              future: [],
-            }));
-            showToast('Loaded sample courses.');
-          }}
-          onResetEmpty={() => {
-            const empty = createEmptyState();
-            setSandboxState(null);
-            const saved = storageService.save(empty, { touchTimestamp: true });
-            setDoc((prev) => ({
-              current: saved,
-              past: [...prev.past.slice(-(MAX_HISTORY - 1)), prev.current],
-              future: [],
-            }));
-            showToast('Started fresh blank tracker.');
-          }}
-        />
-      )}
+      {syncSnapshot.status === 'conflict' &&
+        syncSnapshot.conflict &&
+        !conflictDismissed && (
+          <SyncConflictModal
+            conflict={syncSnapshot.conflict}
+            localState={state}
+            onKeepLocal={async () => {
+              await cloudSyncManager.resolveConflict(
+                'keep-local',
+                stateRef.current,
+              );
+              showToast('Saved local courses to Google Cloud.');
+            }}
+            onUseRemote={async () => {
+              const hadRemote = Boolean(syncSnapshot.conflict?.remoteState);
+              await cloudSyncManager.resolveConflict(
+                'use-remote',
+                stateRef.current,
+              );
+              setSandboxState(null);
+              setDoc({
+                current: storageService.load(),
+                past: [],
+                future: [],
+              });
+              showToast(
+                hadRemote
+                  ? 'Loaded courses from Google Cloud.'
+                  : 'Started clean tracker for this account.',
+              );
+            }}
+            onClose={() => setConflictDismissed(true)}
+          />
+        )}
 
       {showScaleModal && !readOnly && (
         <ScaleEditorModal
