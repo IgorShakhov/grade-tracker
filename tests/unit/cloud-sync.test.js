@@ -722,4 +722,65 @@ describe('CloudSyncManager & Firestore Security Rules Invariants (cloudSync.js)'
 
     mgr.stop();
   });
+
+  it('flushes pending debounced edits before signing out and requires confirmation when offline/unsynced (#9)', async () => {
+    const fbMock = createRulesEnforcingFirebaseMock();
+    const mem = createMemoryStorage();
+    const storageSvc = new StorageService({ storage: mem });
+    const mgr = new CloudSyncManager({
+      firebaseFactory: () => fbMock.service,
+      storage: mem,
+      storageSvc,
+      debounceMs: 5000, // Long 5s debounce to prove signOutUser flushes immediately!
+    });
+    mgr.start();
+
+    fbMock.setPopupUser({ uid: 'user-1', email: 's@example.com' });
+    await mgr.signInWithGoogle();
+
+    // 1. Online edit + immediate same-tick signOutUser() (< 5s debounce) -> flushes to cloud BEFORE wiping local storage!
+    const edited = storageSvc.load();
+    edited.studentName = 'Saved Right Before SignOut';
+    storageSvc.save(edited);
+
+    const onlineRes = await mgr.signOutUser();
+    expect(onlineRes).toEqual({ signedOut: true, requiresDiscardConfirm: false });
+    expect(
+      JSON.parse(fbMock.docs.get('users/user-1').stateJson).studentName,
+    ).toBe('Saved Right Before SignOut');
+    expect(storageSvc.load().studentName).toBe('My');
+
+    // 2. Sign back in, simulate network failure on push, edit, and attempt same-tick signOutUser() -> blocks & preserves local edit!
+    await mgr.signInWithGoogle();
+    expect(storageSvc.load().studentName).toBe('Saved Right Before SignOut');
+
+    const origBatch = fbMock.service.writeBatch;
+    fbMock.service.writeBatch = () => {
+      const b = origBatch();
+      b.commit = async () => {
+        const err = new Error('Offline');
+        err.code = 'unavailable';
+        throw err;
+      };
+      return b;
+    };
+
+    const offlineEdit = storageSvc.load();
+    offlineEdit.studentName = 'Offline Unsynced Edit';
+    storageSvc.save(offlineEdit);
+
+    const blockedRes = await mgr.signOutUser();
+    expect(blockedRes).toEqual({ signedOut: false, requiresDiscardConfirm: true });
+    expect(mgr.getSnapshot().dirty).toBe(true);
+    expect(mgr.getSnapshot().user?.uid).toBe('user-1');
+    expect(storageSvc.load().studentName).toBe('Offline Unsynced Edit');
+
+    // Explicit forceDiscard signs out and wipes local storage cleanly
+    const forcedRes = await mgr.signOutUser({ forceDiscard: true });
+    expect(forcedRes).toEqual({ signedOut: true, requiresDiscardConfirm: false });
+    expect(mgr.getSnapshot().user).toBeNull();
+    expect(storageSvc.load().studentName).toBe('My');
+
+    mgr.stop();
+  });
 });

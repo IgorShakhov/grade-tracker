@@ -41,6 +41,7 @@ export function CloudSyncModal({
   const [busyAction, setBusyAction] = useState(null);
   const [localError, setLocalError] = useState('');
   const [confirmingCloudDelete, setConfirmingCloudDelete] = useState(false);
+  const [confirmingUnsyncedSignOut, setConfirmingUnsyncedSignOut] = useState(false);
 
   const user = syncSnapshot?.user;
   const isSignedIn = Boolean(user);
@@ -49,11 +50,24 @@ export function CloudSyncModal({
     setLocalError('');
     setBusyAction(label);
     try {
-      await fn();
+      return await fn();
     } catch (err) {
       setLocalError(err?.message || 'Action could not be completed.');
+      return null;
     } finally {
       setBusyAction(null);
+    }
+  }
+
+  async function handleSignOutAttempt(forceDiscard = false) {
+    const res = await runAction(
+      forceDiscard ? 'signout-force' : 'signout',
+      () => onSignOut({ forceDiscard }),
+    );
+    if (res?.requiresDiscardConfirm) {
+      setConfirmingUnsyncedSignOut(true);
+    } else if (res?.signedOut) {
+      setConfirmingUnsyncedSignOut(false);
     }
   }
 
@@ -153,17 +167,56 @@ export function CloudSyncModal({
                       type="button"
                       className="btn btn-sm"
                       disabled={busyAction !== null}
-                      onClick={() => runAction('signout', onSignOut)}
+                      onClick={() => handleSignOutAttempt(false)}
                     >
-                      {busyAction === 'signout' ? 'Signing out…' : 'Sign Out'}
+                      {busyAction === 'signout' ? 'Saving & signing out…' : 'Sign Out'}
                     </button>
                   </div>
                 </div>
               </div>
 
+              {confirmingUnsyncedSignOut && (
+                <div
+                  className="data-action-row"
+                  style={{
+                    marginBottom: '0.85rem',
+                    borderColor: 'var(--danger-fg)',
+                  }}
+                >
+                  <div className="data-action-info">
+                    <strong>Unsynced Changes on This Device</strong>
+                    <span>
+                      Could not sync latest edits to Google Cloud. Sign out anyway
+                      and discard unsaved local changes?
+                    </span>
+                  </div>
+                  <div style={{ display: 'flex', gap: '0.35rem', flexShrink: 0 }}>
+                    <button
+                      type="button"
+                      className="btn btn-sm"
+                      disabled={busyAction !== null}
+                      onClick={() => setConfirmingUnsyncedSignOut(false)}
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      id="confirm-discard-signout-btn"
+                      type="button"
+                      className="btn btn-danger btn-sm"
+                      disabled={busyAction !== null}
+                      onClick={() => handleSignOutAttempt(true)}
+                    >
+                      {busyAction === 'signout-force'
+                        ? 'Signing out…'
+                        : 'Sign Out & Discard'}
+                    </button>
+                  </div>
+                </div>
+              )}
+
               <p style={{ fontSize: '0.78rem', marginBottom: '0.9rem' }}>
-                Signing out clears cached grades from this browser while keeping your
-                courses safely stored in your Google cloud account.
+                Signing out saves pending edits first (when online) and clears cached
+                grades from this browser.
               </p>
 
               <div className="data-action-row">
