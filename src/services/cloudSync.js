@@ -694,8 +694,10 @@ export class CloudSyncManager {
 
       // Case B: Never synced on this browser before (`lastSyncedUid === null`)
       if (!lastSyncedUid) {
-        const hasCustomLocalData =
-          dirty || !areTrackerStatesEquivalent(localState, createInitialState());
+        const hasCustomLocalData = !areTrackerStatesEquivalent(
+          localState,
+          createInitialState(),
+        );
         const differsFromRemote = !areTrackerStatesEquivalent(localState, remoteState);
 
         if (hasCustomLocalData && differsFromRemote) {
@@ -806,11 +808,18 @@ export class CloudSyncManager {
     return this.authEpoch === epoch && this.currentUser?.uid === uid;
   }
 
+  hasUnreconciledCustomLocalCourses() {
+    if (this.meta.lastSyncedUid) return false;
+    const current = this.latestLocalState || this.storageSvc.load();
+    return !areTrackerStatesEquivalent(current, createInitialState());
+  }
+
   /**
    * Signs out of Firebase Auth AND wipes local grade storage + sync metadata (`E2`).
    * Unless `forceDiscard` is true, flushes any pending debounced edits to Firestore first;
-   * if unsynced edits still remain (offline, conflict, or push failure), aborts sign-out
-   * and returns `{ signedOut: false, requiresDiscardConfirm: true }` (#9).
+   * if unsynced edits still remain (offline, conflict, push failure, or failed initial
+   * reconciliation over custom local courses), aborts sign-out and returns
+   * `{ signedOut: false, requiresDiscardConfirm: true }` (#9).
    */
   async signOutUser({ forceDiscard = false } = {}) {
     await Promise.resolve();
@@ -822,13 +831,18 @@ export class CloudSyncManager {
         await this.inFlightPromise.catch(() => {});
       }
 
-      if (this.currentUser && (this.meta.dirty || this.debounceTimer !== null)) {
+      const needsFlush =
+        this.meta.dirty ||
+        this.debounceTimer !== null ||
+        this.hasUnreconciledCustomLocalCourses();
+
+      if (this.currentUser && needsFlush) {
         this.cancelDebounce();
         if (!isBrowserOffline() && this.status !== 'conflict') {
           try {
             await this.flushPendingSave();
           } catch {
-            // Leave dirty:true so confirmation prompt triggers below
+            // Leave unsynced state intact so confirmation prompt triggers below
           }
           if (this.inFlightPromise) {
             await this.inFlightPromise.catch(() => {});
@@ -836,7 +850,12 @@ export class CloudSyncManager {
         }
       }
 
-      if (this.currentUser && (this.meta.dirty || this.status === 'conflict')) {
+      if (
+        this.currentUser &&
+        (this.meta.dirty ||
+          this.status === 'conflict' ||
+          this.hasUnreconciledCustomLocalCourses())
+      ) {
         return { signedOut: false, requiresDiscardConfirm: true };
       }
     }
@@ -868,6 +887,7 @@ export class CloudSyncManager {
   }
 
   async flushPendingSave() {
+    await Promise.resolve();
     if (this.reconcilePromise) {
       await this.reconcilePromise.catch(() => {});
     }
@@ -878,8 +898,9 @@ export class CloudSyncManager {
       await this.reconcileOnSignIn(this.currentUser.uid, this.authEpoch);
       return;
     }
+    const pushedSeq = this.localMutationSeq;
     const stateToSave = this.latestLocalState || this.storageSvc.load();
-    await this.pushStateToCloud(stateToSave);
+    await this.pushStateToCloud(stateToSave, { pushedSeq });
   }
 
   async pushStateToCloud(
@@ -989,6 +1010,7 @@ export class CloudSyncManager {
             this.inFlightPromise = null;
             await this.pushStateToCloud(validated, {
               allowMissingRecreateRetry: false,
+              pushedSeq,
             });
             return;
           }
@@ -1019,8 +1041,9 @@ export class CloudSyncManager {
         this.status !== 'conflict'
       ) {
         this.queuedFlushAfterFlight = false;
+        const nextSeq = this.localMutationSeq;
         const latest = this.latestLocalState || this.storageSvc.load();
-        await this.pushStateToCloud(latest);
+        await this.pushStateToCloud(latest, { pushedSeq: nextSeq });
       } else {
         this.queuedFlushAfterFlight = false;
       }
@@ -1031,9 +1054,10 @@ export class CloudSyncManager {
    * Manually syncs with Firestore (also used on window focus / network reconnect).
    */
   async syncNow(currentLocalState) {
+    await Promise.resolve();
     if (!this.currentUser) return null;
     this.cancelDebounce();
-    if (currentLocalState) {
+    if (currentLocalState && !this.latestLocalState) {
       this.latestLocalState = currentLocalState;
     }
 
@@ -1192,6 +1216,7 @@ export class CloudSyncManager {
    * and deleting `shares/{oldToken}` so zero orphan share documents ever remain).
    */
   async enableOrRotateShare(currentLocalState) {
+    await Promise.resolve();
     if (!this.currentUser) {
       throw new Error('Sign in with Google first to enable a live share link.');
     }
@@ -1199,7 +1224,7 @@ export class CloudSyncManager {
     if (this.reconcilePromise) {
       await this.reconcilePromise;
     }
-    if (this.inFlightPromise) {
+    while (this.inFlightPromise) {
       await this.inFlightPromise;
     }
     if (!this.currentUser) {
@@ -1208,25 +1233,173 @@ export class CloudSyncManager {
 
     const uid = this.currentUser.uid;
     const startEpoch = this.authEpoch;
-    const pushedSeq = this.localMutationSeq;
-    let effectiveState = validateTrackerState(
-      currentLocalState || this.latestLocalState || this.storageSvc.load(),
-    );
+    let createdToken = null;
 
-    const fb = this.firebaseFactory();
-    const userRef = fb.doc('users', uid);
-    const userSnap = await fb.getDoc(userRef);
-    if (!this.isSessionCurrent(uid, startEpoch)) {
-      throw new Error('Account session changed.');
+    const run = async () => {
+      const pushedSeq = this.localMutationSeq;
+      let effectiveState = validateTrackerState(
+        this.latestLocalState || currentLocalState || this.storageSvc.load(),
+      );
+
+      const fb = this.firebaseFactory();
+      const userRef = fb.doc('users', uid);
+      const userSnap = await fb.getDoc(userRef);
+      if (!this.isSessionCurrent(uid, startEpoch)) {
+        throw new Error('Account session changed.');
+      }
+
+      let baseRev = 0;
+      let oldToken = this.meta.shareToken;
+
+      if (userSnap.exists()) {
+        const data = userSnap.data() || {};
+        baseRev = typeof data.rev === 'number' && Number.isInteger(data.rev) ? data.rev : 0;
+        oldToken = isValidShareToken(data.shareToken) ? data.shareToken.trim() : null;
+        const remoteState = validateTrackerState(JSON.parse(data.stateJson));
+
+        if ((this.meta.lastSyncedRev || 0) !== baseRev) {
+          if (this.meta.dirty || this.localMutationSeq !== pushedSeq) {
+            this.status = 'conflict';
+            this.conflict = {
+              reason: 'rev-mismatch',
+              remoteState,
+              remoteRev: baseRev,
+              remoteShareToken: oldToken,
+            };
+            this.emit();
+            throw new Error(
+              'Cloud grades were updated on another device. Please resolve the sync conflict first.',
+            );
+          }
+          effectiveState = this.applyRemoteStateLocally(remoteState);
+        }
+      }
+
+      const stateJson = JSON.stringify(effectiveState);
+      if (stateJson.length >= MAX_STATE_JSON_CHARS) {
+        throw new Error('Tracker data exceeds the 300 KB cloud document limit.');
+      }
+
+      const newToken = generateShareToken();
+      const nextRev = baseRev + 1;
+
+      let shouldDeleteOldShare = false;
+      if (oldToken && oldToken !== newToken) {
+        const oldShareSnap = await fb.getDoc(fb.doc('shares', oldToken));
+        if (!this.isSessionCurrent(uid, startEpoch)) {
+          throw new Error('Account session changed.');
+        }
+        shouldDeleteOldShare =
+          oldShareSnap.exists() && oldShareSnap.data()?.ownerUid === uid;
+      }
+
+      const batch = fb.writeBatch();
+      batch.set(userRef, {
+        stateJson,
+        updatedAt: fb.serverTimestamp(),
+        rev: nextRev,
+        shareToken: newToken,
+      });
+      batch.set(fb.doc('shares', newToken), {
+        ownerUid: uid,
+        stateJson,
+        updatedAt: fb.serverTimestamp(),
+      });
+      if (shouldDeleteOldShare) {
+        batch.delete(fb.doc('shares', oldToken));
+      }
+
+      await batch.commit();
+      if (!this.isSessionCurrent(uid, startEpoch)) {
+        throw new Error('Account session changed.');
+      }
+
+      const hasNewerLocalEdits = this.localMutationSeq !== pushedSeq;
+      this.saveMeta({
+        lastSyncedUid: uid,
+        lastSyncedRev: nextRev,
+        shareToken: newToken,
+        lastSyncedAt: new Date().toISOString(),
+        dirty: hasNewerLocalEdits,
+      });
+      this.status = hasNewerLocalEdits
+        ? isBrowserOffline()
+          ? 'offline'
+          : 'pending'
+        : 'synced';
+      this.error = null;
+      this.emit();
+      if (hasNewerLocalEdits) {
+        this.scheduleFollowUpFlushIfNeeded();
+      }
+      createdToken = newToken;
+    };
+
+    this.inFlightPromise = run();
+    try {
+      await this.inFlightPromise;
+      return createdToken;
+    } finally {
+      this.inFlightPromise = null;
+      if (
+        this.queuedFlushAfterFlight &&
+        this.isSessionCurrent(uid, startEpoch) &&
+        this.status !== 'conflict'
+      ) {
+        this.queuedFlushAfterFlight = false;
+        const nextSeq = this.localMutationSeq;
+        const latest = this.latestLocalState || this.storageSvc.load();
+        await this.pushStateToCloud(latest, { pushedSeq: nextSeq });
+      } else {
+        this.queuedFlushAfterFlight = false;
+      }
+    }
+  }
+
+  /**
+   * Disables the active live share link in a single atomic `writeBatch`
+   * (setting `users/{uid}.shareToken = null` and deleting `shares/{oldToken}`).
+   */
+  async disableShare(currentLocalState) {
+    await Promise.resolve();
+    if (!this.currentUser) {
+      throw new Error('Not signed in.');
+    }
+    this.cancelDebounce();
+    if (this.reconcilePromise) {
+      await this.reconcilePromise;
+    }
+    while (this.inFlightPromise) {
+      await this.inFlightPromise;
+    }
+    if (!this.currentUser) {
+      throw new Error('Not signed in.');
     }
 
-    let baseRev = 0;
-    let oldToken = this.meta.shareToken;
+    const uid = this.currentUser.uid;
+    const startEpoch = this.authEpoch;
 
-    if (userSnap.exists()) {
+    const run = async () => {
+      const pushedSeq = this.localMutationSeq;
+      let effectiveState = validateTrackerState(
+        this.latestLocalState || currentLocalState || this.storageSvc.load(),
+      );
+
+      const fb = this.firebaseFactory();
+      const userRef = fb.doc('users', uid);
+      const userSnap = await fb.getDoc(userRef);
+      if (!this.isSessionCurrent(uid, startEpoch)) return;
+      if (!userSnap.exists()) {
+        this.saveMeta({ shareToken: null });
+        this.emit();
+        return;
+      }
+
       const data = userSnap.data() || {};
-      baseRev = typeof data.rev === 'number' && Number.isInteger(data.rev) ? data.rev : 0;
-      oldToken = isValidShareToken(data.shareToken) ? data.shareToken.trim() : null;
+      const baseRev = typeof data.rev === 'number' && Number.isInteger(data.rev) ? data.rev : 0;
+      const oldToken = isValidShareToken(data.shareToken)
+        ? data.shareToken.trim()
+        : this.meta.shareToken;
       const remoteState = validateTrackerState(JSON.parse(data.stateJson));
 
       if ((this.meta.lastSyncedRev || 0) !== baseRev) {
@@ -1243,176 +1416,74 @@ export class CloudSyncManager {
             'Cloud grades were updated on another device. Please resolve the sync conflict first.',
           );
         }
-        // Adopt newer cloud state so rotating/enabling a share never clobbers another device's edits
         effectiveState = this.applyRemoteStateLocally(remoteState);
       }
-    }
 
-    const stateJson = JSON.stringify(effectiveState);
-    if (stateJson.length >= MAX_STATE_JSON_CHARS) {
-      throw new Error('Tracker data exceeds the 300 KB cloud document limit.');
-    }
-
-    const newToken = generateShareToken();
-    const nextRev = baseRev + 1;
-
-    let shouldDeleteOldShare = false;
-    if (oldToken && oldToken !== newToken) {
-      const oldShareSnap = await fb.getDoc(fb.doc('shares', oldToken));
-      if (!this.isSessionCurrent(uid, startEpoch)) {
-        throw new Error('Account session changed.');
+      const stateJson = JSON.stringify(effectiveState);
+      if (stateJson.length >= MAX_STATE_JSON_CHARS) {
+        throw new Error('Tracker data exceeds the 300 KB cloud document limit.');
       }
-      shouldDeleteOldShare =
-        oldShareSnap.exists() && oldShareSnap.data()?.ownerUid === uid;
-    }
 
-    const batch = fb.writeBatch();
-    batch.set(userRef, {
-      stateJson,
-      updatedAt: fb.serverTimestamp(),
-      rev: nextRev,
-      shareToken: newToken,
-    });
-    batch.set(fb.doc('shares', newToken), {
-      ownerUid: uid,
-      stateJson,
-      updatedAt: fb.serverTimestamp(),
-    });
-    if (shouldDeleteOldShare) {
-      batch.delete(fb.doc('shares', oldToken));
-    }
-
-    await batch.commit();
-    if (!this.isSessionCurrent(uid, startEpoch)) {
-      throw new Error('Account session changed.');
-    }
-
-    const hasNewerLocalEdits = this.localMutationSeq !== pushedSeq;
-    this.saveMeta({
-      lastSyncedUid: uid,
-      lastSyncedRev: nextRev,
-      shareToken: newToken,
-      lastSyncedAt: new Date().toISOString(),
-      dirty: hasNewerLocalEdits,
-    });
-    this.status = hasNewerLocalEdits
-      ? isBrowserOffline()
-        ? 'offline'
-        : 'pending'
-      : 'synced';
-    this.error = null;
-    this.emit();
-    if (hasNewerLocalEdits) {
-      this.scheduleFollowUpFlushIfNeeded();
-    }
-    return newToken;
-  }
-
-  /**
-   * Disables the active live share link in a single atomic `writeBatch`
-   * (setting `users/{uid}.shareToken = null` and deleting `shares/{oldToken}`).
-   */
-  async disableShare(currentLocalState) {
-    if (!this.currentUser) {
-      throw new Error('Not signed in.');
-    }
-    this.cancelDebounce();
-    if (this.reconcilePromise) {
-      await this.reconcilePromise;
-    }
-    if (this.inFlightPromise) {
-      await this.inFlightPromise;
-    }
-    if (!this.currentUser) {
-      throw new Error('Not signed in.');
-    }
-
-    const uid = this.currentUser.uid;
-    const startEpoch = this.authEpoch;
-    const pushedSeq = this.localMutationSeq;
-    let effectiveState = validateTrackerState(
-      currentLocalState || this.latestLocalState || this.storageSvc.load(),
-    );
-
-    const fb = this.firebaseFactory();
-    const userRef = fb.doc('users', uid);
-    const userSnap = await fb.getDoc(userRef);
-    if (!this.isSessionCurrent(uid, startEpoch)) return;
-    if (!userSnap.exists()) {
-      this.saveMeta({ shareToken: null });
-      this.emit();
-      return;
-    }
-
-    const data = userSnap.data() || {};
-    const baseRev = typeof data.rev === 'number' && Number.isInteger(data.rev) ? data.rev : 0;
-    const oldToken = isValidShareToken(data.shareToken)
-      ? data.shareToken.trim()
-      : this.meta.shareToken;
-    const remoteState = validateTrackerState(JSON.parse(data.stateJson));
-
-    if ((this.meta.lastSyncedRev || 0) !== baseRev) {
-      if (this.meta.dirty || this.localMutationSeq !== pushedSeq) {
-        this.status = 'conflict';
-        this.conflict = {
-          reason: 'rev-mismatch',
-          remoteState,
-          remoteRev: baseRev,
-          remoteShareToken: oldToken,
-        };
-        this.emit();
-        throw new Error(
-          'Cloud grades were updated on another device. Please resolve the sync conflict first.',
-        );
+      let shouldDeleteOldShare = false;
+      if (oldToken) {
+        const oldShareSnap = await fb.getDoc(fb.doc('shares', oldToken));
+        if (!this.isSessionCurrent(uid, startEpoch)) return;
+        shouldDeleteOldShare =
+          oldShareSnap.exists() && oldShareSnap.data()?.ownerUid === uid;
       }
-      effectiveState = this.applyRemoteStateLocally(remoteState);
-    }
 
-    const stateJson = JSON.stringify(effectiveState);
-    if (stateJson.length >= MAX_STATE_JSON_CHARS) {
-      throw new Error('Tracker data exceeds the 300 KB cloud document limit.');
-    }
+      const nextRev = baseRev + 1;
+      const batch = fb.writeBatch();
+      batch.set(userRef, {
+        stateJson,
+        updatedAt: fb.serverTimestamp(),
+        rev: nextRev,
+        shareToken: null,
+      });
+      if (shouldDeleteOldShare) {
+        batch.delete(fb.doc('shares', oldToken));
+      }
 
-    let shouldDeleteOldShare = false;
-    if (oldToken) {
-      const oldShareSnap = await fb.getDoc(fb.doc('shares', oldToken));
+      await batch.commit();
       if (!this.isSessionCurrent(uid, startEpoch)) return;
-      shouldDeleteOldShare =
-        oldShareSnap.exists() && oldShareSnap.data()?.ownerUid === uid;
-    }
 
-    const nextRev = baseRev + 1;
-    const batch = fb.writeBatch();
-    batch.set(userRef, {
-      stateJson,
-      updatedAt: fb.serverTimestamp(),
-      rev: nextRev,
-      shareToken: null,
-    });
-    if (shouldDeleteOldShare) {
-      batch.delete(fb.doc('shares', oldToken));
-    }
+      const hasNewerLocalEdits = this.localMutationSeq !== pushedSeq;
+      this.saveMeta({
+        lastSyncedUid: uid,
+        lastSyncedRev: nextRev,
+        shareToken: null,
+        lastSyncedAt: new Date().toISOString(),
+        dirty: hasNewerLocalEdits,
+      });
+      this.status = hasNewerLocalEdits
+        ? isBrowserOffline()
+          ? 'offline'
+          : 'pending'
+        : 'synced';
+      this.error = null;
+      this.emit();
+      if (hasNewerLocalEdits) {
+        this.scheduleFollowUpFlushIfNeeded();
+      }
+    };
 
-    await batch.commit();
-    if (!this.isSessionCurrent(uid, startEpoch)) return;
-
-    const hasNewerLocalEdits = this.localMutationSeq !== pushedSeq;
-    this.saveMeta({
-      lastSyncedUid: uid,
-      lastSyncedRev: nextRev,
-      shareToken: null,
-      lastSyncedAt: new Date().toISOString(),
-      dirty: hasNewerLocalEdits,
-    });
-    this.status = hasNewerLocalEdits
-      ? isBrowserOffline()
-        ? 'offline'
-        : 'pending'
-      : 'synced';
-    this.error = null;
-    this.emit();
-    if (hasNewerLocalEdits) {
-      this.scheduleFollowUpFlushIfNeeded();
+    this.inFlightPromise = run();
+    try {
+      await this.inFlightPromise;
+    } finally {
+      this.inFlightPromise = null;
+      if (
+        this.queuedFlushAfterFlight &&
+        this.isSessionCurrent(uid, startEpoch) &&
+        this.status !== 'conflict'
+      ) {
+        this.queuedFlushAfterFlight = false;
+        const nextSeq = this.localMutationSeq;
+        const latest = this.latestLocalState || this.storageSvc.load();
+        await this.pushStateToCloud(latest, { pushedSeq: nextSeq });
+      } else {
+        this.queuedFlushAfterFlight = false;
+      }
     }
   }
 
