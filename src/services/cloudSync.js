@@ -474,9 +474,10 @@ export class CloudSyncManager {
         this.authUnsubscribe = fb.onAuthStateChanged(
           (fbUser) => {
             this.handleAuthStateChanged(fbUser).catch((err) => {
-              const msg = formatFriendlyError(err);
-              this.status = isBrowserOffline() ? 'offline' : 'error';
-              this.error = msg;
+              if (!this.currentUser || this.status !== 'syncing') return;
+              const offline = isBrowserOffline() || err?.code === 'unavailable';
+              this.status = offline ? 'offline' : 'error';
+              this.error = offline ? null : formatFriendlyError(err);
               this.emit();
             });
           },
@@ -543,9 +544,22 @@ export class CloudSyncManager {
 
     if (event.key === SYNC_META_KEY) {
       this.meta = this.loadMeta();
-      if (!this.meta.dirty && this.status === 'pending') {
-        this.cancelDebounce();
-        if (this.currentUser) {
+      if (!this.meta.dirty) {
+        if (this.status === 'pending') {
+          this.cancelDebounce();
+          if (this.currentUser) {
+            this.status = 'synced';
+          }
+        } else if (
+          this.status === 'conflict' &&
+          this.currentUser &&
+          this.meta.lastSyncedUid === this.currentUser.uid &&
+          this.meta.lastSyncedRev > 0 &&
+          !this.inFlightPromise
+        ) {
+          this.cancelDebounce();
+          this.conflict = null;
+          this.error = null;
           this.status = 'synced';
         }
       }
@@ -707,12 +721,27 @@ export class CloudSyncManager {
     this.emit();
 
     try {
+      const preFetchHadSyncedRev =
+        this.meta.lastSyncedUid === uid && (this.meta.lastSyncedRev || 0) > 0;
       const fb = this.firebaseFactory();
       const userRef = fb.doc('users', uid);
-      const snap = await fb.getDoc(userRef);
+      let snap = await fb.getDoc(userRef);
 
       if (expectedEpoch !== this.authEpoch || this.currentUser?.uid !== uid) {
         return;
+      }
+
+      if (
+        !snap.exists() &&
+        !preFetchHadSyncedRev &&
+        this.meta.lastSyncedUid === uid &&
+        (this.meta.lastSyncedRev || 0) > 0
+      ) {
+        // Another tab just created `users/{uid}` while our initial getDoc was in flight
+        snap = await fb.getDoc(userRef);
+        if (expectedEpoch !== this.authEpoch || this.currentUser?.uid !== uid) {
+          return;
+        }
       }
 
       const localState = this.latestLocalState || this.storageSvc.load();
@@ -801,15 +830,17 @@ export class CloudSyncManager {
             await this.pushStateToCloud(localState);
             return;
           }
-          this.status = 'conflict';
-          this.conflict = {
-            reason: 'rev-mismatch',
-            remoteState,
-            remoteRev,
-            remoteShareToken,
-          };
-          this.emit();
-          return;
+          if (!areTrackerStatesEquivalent(localState, remoteState)) {
+            this.status = 'conflict';
+            this.conflict = {
+              reason: 'rev-mismatch',
+              remoteState,
+              remoteRev,
+              remoteShareToken,
+            };
+            this.emit();
+            return;
+          }
         }
 
         this.saveMeta({
@@ -852,9 +883,10 @@ export class CloudSyncManager {
         return;
       }
 
-      // First-time cloud setup for this user -> create `users/{uid}` at `rev: 1`
+      // First-time cloud setup for this user -> create `users/{uid}` at `rev: 1`.
+      // Leave `lastSyncedUid` unset until `pushStateToCloud` commits so failed initial pushes
+      // never strip `hasUnreconciledCustomLocalCourses()` protection.
       this.saveMeta({
-        lastSyncedUid: uid,
         lastSyncedRev: 0,
         shareToken: null,
       });
@@ -1004,7 +1036,10 @@ export class CloudSyncManager {
     await this.pushStateToCloud(stateToSave, { pushedSeq });
   }
 
-  async pushStateToCloud(rawState, { pushedSeq = this.localMutationSeq } = {}) {
+  async pushStateToCloud(
+    rawState,
+    { pushedSeq = this.localMutationSeq, resolvingConflict = false } = {},
+  ) {
     if (!this.currentUser) return;
 
     if (this.inFlightPromise) {
@@ -1022,41 +1057,43 @@ export class CloudSyncManager {
 
     const run = async () => {
       if (!this.isSessionCurrent(uid, startEpoch)) return;
-      this.status = 'syncing';
-      this.error = null;
-      this.emit();
-
-      const validated = validateTrackerState(rawState);
-      const stateJson = JSON.stringify(validated);
-      if (stateJson.length >= MAX_STATE_JSON_CHARS) {
-        throw new Error(
-          'Tracker data exceeds the 300 KB cloud document limit. Remove unused terms or courses.',
-        );
-      }
-
-      const fb = this.firebaseFactory();
-      const nextRev = (this.meta.lastSyncedRev || 0) + 1;
-      const activeShareToken = isValidShareToken(this.meta.shareToken)
-        ? this.meta.shareToken.trim()
-        : null;
-
-      const batch = fb.writeBatch();
-      batch.set(fb.doc('users', uid), {
-        stateJson,
-        updatedAt: fb.serverTimestamp(),
-        rev: nextRev,
-        shareToken: activeShareToken,
-      });
-
-      if (activeShareToken) {
-        batch.set(fb.doc('shares', activeShareToken), {
-          ownerUid: uid,
-          stateJson,
-          updatedAt: fb.serverTimestamp(),
-        });
+      if (!resolvingConflict) {
+        this.status = 'syncing';
+        this.error = null;
+        this.emit();
       }
 
       try {
+        const validated = validateTrackerState(rawState);
+        const stateJson = JSON.stringify(validated);
+        if (stateJson.length >= MAX_STATE_JSON_CHARS) {
+          throw new Error(
+            'Tracker data exceeds the 300 KB cloud document limit. Remove unused terms or courses.',
+          );
+        }
+
+        const fb = this.firebaseFactory();
+        const nextRev = (this.meta.lastSyncedRev || 0) + 1;
+        const activeShareToken = isValidShareToken(this.meta.shareToken)
+          ? this.meta.shareToken.trim()
+          : null;
+
+        const batch = fb.writeBatch();
+        batch.set(fb.doc('users', uid), {
+          stateJson,
+          updatedAt: fb.serverTimestamp(),
+          rev: nextRev,
+          shareToken: activeShareToken,
+        });
+
+        if (activeShareToken) {
+          batch.set(fb.doc('shares', activeShareToken), {
+            ownerUid: uid,
+            stateJson,
+            updatedAt: fb.serverTimestamp(),
+          });
+        }
+
         await batch.commit();
         if (!this.isSessionCurrent(uid, startEpoch)) return;
         const hasNewerLocalEdits = this.localMutationSeq !== pushedSeq;
@@ -1081,6 +1118,7 @@ export class CloudSyncManager {
       } catch (err) {
         if (!this.isSessionCurrent(uid, startEpoch)) return;
         if (err?.code === 'permission-denied') {
+          const fb = this.firebaseFactory();
           const snap = await fb.getDoc(fb.doc('users', uid));
           if (!this.isSessionCurrent(uid, startEpoch)) return;
           if (snap.exists()) {
@@ -1093,6 +1131,34 @@ export class CloudSyncManager {
               ? data.shareToken.trim()
               : null;
             const remoteState = validateTrackerState(JSON.parse(data.stateJson));
+            const currentLocal = this.latestLocalState || this.storageSvc.load();
+
+            if (areTrackerStatesEquivalent(currentLocal, remoteState)) {
+              const hasNewerLocalEdits = this.localMutationSeq !== pushedSeq;
+              this.saveMeta({
+                lastSyncedUid: uid,
+                lastSyncedRev: remoteRev,
+                shareToken: remoteShareToken,
+                lastSyncedAt: new Date().toISOString(),
+                dirty: hasNewerLocalEdits,
+              });
+              if (!hasNewerLocalEdits) {
+                this.applyRemoteStateLocally(remoteState);
+              }
+              this.conflict = null;
+              this.status = hasNewerLocalEdits
+                ? isBrowserOffline()
+                  ? 'offline'
+                  : 'pending'
+                : 'synced';
+              this.error = null;
+              this.emit();
+              if (hasNewerLocalEdits) {
+                this.scheduleFollowUpFlushIfNeeded();
+              }
+              return;
+            }
+
             this.status = 'conflict';
             this.conflict = {
               reason: 'rev-mismatch',
@@ -1100,6 +1166,7 @@ export class CloudSyncManager {
               remoteRev,
               remoteShareToken,
             };
+            this.error = null;
             this.emit();
             return;
           }
@@ -1118,15 +1185,20 @@ export class CloudSyncManager {
         }
 
         if (isBrowserOffline() || err?.code === 'unavailable') {
+          if (resolvingConflict) {
+            this.conflict = null;
+          }
           this.status = 'offline';
           this.error = null;
           this.emit();
           return;
         }
 
-        this.status = 'error';
-        this.error = formatFriendlyError(err);
-        this.emit();
+        if (!resolvingConflict) {
+          this.status = 'error';
+          this.error = formatFriendlyError(err);
+          this.emit();
+        }
         throw err;
       }
     };
@@ -1205,7 +1277,6 @@ export class CloudSyncManager {
           return this.getSnapshot();
         }
         this.saveMeta({
-          lastSyncedUid: uid,
           lastSyncedRev: 0,
           shareToken: null,
         });
@@ -1231,18 +1302,21 @@ export class CloudSyncManager {
           await this.pushStateToCloud(localState);
           return this.getSnapshot();
         }
-        this.status = 'conflict';
-        this.conflict = {
-          reason: 'rev-mismatch',
-          remoteState,
-          remoteRev,
-          remoteShareToken,
-        };
-        this.emit();
-        return this.getSnapshot();
+        if (!areTrackerStatesEquivalent(localState, remoteState)) {
+          this.status = 'conflict';
+          this.conflict = {
+            reason: 'rev-mismatch',
+            remoteState,
+            remoteRev,
+            remoteShareToken,
+          };
+          this.emit();
+          return this.getSnapshot();
+        }
       }
 
-      const revChanged = remoteRev !== this.meta.lastSyncedRev;
+      const revChanged =
+        remoteRev !== this.meta.lastSyncedRev || Boolean(this.meta.dirty);
       this.saveMeta({
         lastSyncedUid: uid,
         lastSyncedRev: remoteRev,
@@ -1310,9 +1384,10 @@ export class CloudSyncManager {
         return this.getSnapshot();
       }
 
-      // New account on shared computer chose to discard previous user's local courses & start fresh
+      // New account on shared computer chose to discard previous user's local courses & start fresh.
+      // Keep `this.conflict` & `this.status === 'conflict'` while commit is in flight (`resolvingConflict: true`)
+      // so `<SyncConflictModal>` stays mounted and preserves its busy/error state.
       const fresh = createInitialState();
-      this.conflict = null;
       this.saveMeta({
         lastSyncedUid: uid,
         lastSyncedRev: 0,
@@ -1320,17 +1395,19 @@ export class CloudSyncManager {
         dirty: true,
       });
       try {
-        await this.pushStateToCloud(fresh);
+        await this.pushStateToCloud(fresh, { resolvingConflict: true });
         if (this.isSessionCurrent(uid, startEpoch) && this.status !== 'conflict') {
           this.applyRemoteStateLocally(fresh);
         }
         return this.getSnapshot();
       } catch (err) {
-        if (this.isSessionCurrent(uid, startEpoch) && this.status !== 'conflict') {
+        if (this.isSessionCurrent(uid, startEpoch)) {
           this.saveMeta(prevMeta);
-          this.conflict = activeConflict;
-          this.status = 'conflict';
-          this.emit();
+          if (this.status !== 'conflict' || !this.conflict) {
+            this.conflict = activeConflict;
+            this.status = 'conflict';
+            this.emit();
+          }
         }
         throw new Error(formatFriendlyError(err) || 'Could not resolve sync conflict.');
       }
@@ -1342,7 +1419,6 @@ export class CloudSyncManager {
       );
       this.latestLocalState = chosenLocal;
       this.storageSvc.saveLocalOnly(chosenLocal);
-      this.conflict = null;
       this.saveMeta({
         lastSyncedUid: uid,
         lastSyncedRev:
@@ -1356,14 +1432,16 @@ export class CloudSyncManager {
         dirty: true,
       });
       try {
-        await this.pushStateToCloud(chosenLocal);
+        await this.pushStateToCloud(chosenLocal, { resolvingConflict: true });
         return this.getSnapshot();
       } catch (err) {
-        if (this.isSessionCurrent(uid, startEpoch) && this.status !== 'conflict') {
+        if (this.isSessionCurrent(uid, startEpoch)) {
           this.saveMeta(prevMeta);
-          this.conflict = activeConflict;
-          this.status = 'conflict';
-          this.emit();
+          if (this.status !== 'conflict' || !this.conflict) {
+            this.conflict = activeConflict;
+            this.status = 'conflict';
+            this.emit();
+          }
         }
         throw new Error(formatFriendlyError(err) || 'Could not resolve sync conflict.');
       }
@@ -1420,7 +1498,10 @@ export class CloudSyncManager {
         const remoteState = validateTrackerState(JSON.parse(data.stateJson));
 
         if ((this.meta.lastSyncedRev || 0) !== baseRev) {
-          if (this.meta.dirty || this.localMutationSeq !== pushedSeq) {
+          if (
+            (this.meta.dirty || this.localMutationSeq !== pushedSeq) &&
+            !areTrackerStatesEquivalent(effectiveState, remoteState)
+          ) {
             this.status = 'conflict';
             this.conflict = {
               reason: 'rev-mismatch',
@@ -1592,7 +1673,10 @@ export class CloudSyncManager {
       const remoteState = validateTrackerState(JSON.parse(data.stateJson));
 
       if ((this.meta.lastSyncedRev || 0) !== baseRev) {
-        if (this.meta.dirty || this.localMutationSeq !== pushedSeq) {
+        if (
+          (this.meta.dirty || this.localMutationSeq !== pushedSeq) &&
+          !areTrackerStatesEquivalent(effectiveState, remoteState)
+        ) {
           this.status = 'conflict';
           this.conflict = {
             reason: 'rev-mismatch',
@@ -1682,7 +1766,7 @@ export class CloudSyncManager {
    */
   async deleteCloudData() {
     await Promise.resolve();
-    if (!this.currentUser) return;
+    if (!this.currentUser) return false;
     this.cancelDebounce();
     if (this.reconcilePromise) {
       await this.reconcilePromise.catch(() => {});
@@ -1690,7 +1774,7 @@ export class CloudSyncManager {
     while (this.inFlightPromise) {
       await this.inFlightPromise.catch(() => {});
     }
-    if (!this.currentUser) return;
+    if (!this.currentUser) return false;
 
     const uid = this.currentUser.uid;
     const startEpoch = this.authEpoch;
@@ -1741,7 +1825,9 @@ export class CloudSyncManager {
 
     if (shouldSignOut && this.isSessionCurrent(uid, startEpoch)) {
       await this.signOutUser({ forceDiscard: true });
+      return true;
     }
+    return false;
   }
 }
 

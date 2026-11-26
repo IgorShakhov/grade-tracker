@@ -305,5 +305,67 @@ describe('Grade Tracker React Application (M1 + M1.1 + Firebase Cloud Sync)', ()
     });
     await waitFor(() => expect(onUseRemote).toHaveBeenCalledTimes(1));
   });
+
+  it('keeps SyncConflictModal mounted inside <App /> and displays inline error when resolveConflict fails in flight (Cluster 2 QA)', async () => {
+    const { cloudSyncManager } = await import('../../src/services/cloudSync.js');
+
+    render(<App />);
+
+    // Put singleton cloudSyncManager into `remote-deleted` conflict state while mounted in <App />
+    act(() => {
+      cloudSyncManager.currentUser = { uid: 'u-qa', email: 'qa@example.com' };
+      cloudSyncManager.status = 'conflict';
+      cloudSyncManager.conflict = {
+        reason: 'remote-deleted',
+        remoteState: null,
+        remoteRev: 0,
+        remoteShareToken: null,
+      };
+      cloudSyncManager.emit();
+    });
+
+    expect(
+      await screen.findByRole('heading', {
+        name: /Cloud Data Deleted on Another Device/i,
+      }),
+    ).toBeInTheDocument();
+
+    const origFactory = cloudSyncManager.firebaseFactory;
+    cloudSyncManager.firebaseFactory = () => ({
+      ...origFactory(),
+      writeBatch: () => ({
+        set: vi.fn(),
+        delete: vi.fn(),
+        commit: vi.fn().mockRejectedValue(
+          Object.assign(new Error('Quota'), { code: 'resource-exhausted' }),
+        ),
+      }),
+    });
+
+    try {
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: /Re-Upload Courses/i }));
+      });
+
+      // Modal MUST remain mounted in <App /> and display the inline role="alert" error!
+      expect(await screen.findByRole('alert')).toHaveTextContent(
+        /Daily free cloud sync quota reached/i,
+      );
+      expect(
+        screen.getByRole('heading', {
+          name: /Cloud Data Deleted on Another Device/i,
+        }),
+      ).toBeInTheDocument();
+    } finally {
+      cloudSyncManager.firebaseFactory = origFactory;
+      act(() => {
+        cloudSyncManager.currentUser = null;
+        cloudSyncManager.conflict = null;
+        cloudSyncManager.status = 'disconnected';
+        cloudSyncManager.clearMeta();
+        cloudSyncManager.emit();
+      });
+    }
+  });
 });
 
