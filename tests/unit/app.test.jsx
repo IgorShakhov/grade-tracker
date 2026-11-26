@@ -1,6 +1,6 @@
 import { StrictMode } from 'react';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { render, screen, within, fireEvent } from '@testing-library/react';
+import { render, screen, within, fireEvent, waitFor, act } from '@testing-library/react';
 import { storageService } from '../../src/services/storage.js';
 
 // Mock Firebase service layer so React UI tests never open network sockets
@@ -244,4 +244,66 @@ describe('Grade Tracker React Application (M1 + M1.1 + Firebase Cloud Sync)', ()
     expect(screen.queryByText(/What-If Exam Simulator ON/i)).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: /↶ Undo/i })).toBeDisabled();
   });
+
+  it('guards SyncConflictModal with busy state, surfaces inline errors, and renders remote-deleted options (#15)', async () => {
+    const { SyncConflictModal } = await import('../../src/components/SyncModals.jsx');
+
+    let rejectKeepLocal;
+    const onKeepLocal = vi.fn(
+      () =>
+        new Promise((_, reject) => {
+          rejectKeepLocal = reject;
+        }),
+    );
+    const onUseRemote = vi.fn(() => Promise.resolve());
+    const onClose = vi.fn();
+
+    render(
+      <SyncConflictModal
+        conflict={{
+          reason: 'remote-deleted',
+          remoteState: null,
+          remoteRev: 0,
+          remoteShareToken: null,
+        }}
+        localState={storageService.load()}
+        onKeepLocal={onKeepLocal}
+        onUseRemote={onUseRemote}
+        onClose={onClose}
+      />,
+    );
+
+    expect(
+      screen.getByRole('heading', { name: /Cloud Data Deleted on Another Device/i }),
+    ).toBeInTheDocument();
+
+    const signOutClearBtn = screen.getByRole('button', { name: /Sign Out & Clear/i });
+    const reuploadBtn = screen.getByRole('button', { name: /Re-Upload Courses/i });
+
+    // Click Re-Upload -> enters busy state and blocks duplicate clicks or dismiss
+    fireEvent.click(reuploadBtn);
+    expect(onKeepLocal).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('button', { name: /Uploading…/i })).toBeDisabled();
+    expect(signOutClearBtn).toBeDisabled();
+    fireEvent.click(signOutClearBtn);
+    expect(onUseRemote).not.toHaveBeenCalled();
+
+    // Reject in-flight promise -> shows inline alert and re-enables buttons for retry
+    await act(async () => {
+      rejectKeepLocal(new Error('Daily free cloud sync quota reached.'));
+    });
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      /Daily free cloud sync quota reached/i,
+    );
+    expect(
+      screen.getByRole('button', { name: /Re-Upload Courses/i }),
+    ).not.toBeDisabled();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /Sign Out & Clear/i }));
+    });
+    await waitFor(() => expect(onUseRemote).toHaveBeenCalledTimes(1));
+  });
 });
+

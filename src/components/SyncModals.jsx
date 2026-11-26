@@ -287,11 +287,42 @@ export function SyncConflictModal({
   onUseRemote,
   onClose,
 }) {
-  const isAccountSwitch = conflict?.reason === 'account-switch';
+  const [busyChoice, setBusyChoice] = useState(null);
+  const [localError, setLocalError] = useState('');
+
+  const reason = conflict?.reason || 'rev-mismatch';
+  const isAccountSwitch = reason === 'account-switch';
+  const isRemoteDeleted = reason === 'remote-deleted';
   const remoteState = conflict?.remoteState || null;
 
+  async function runResolution(choice, fn) {
+    if (busyChoice !== null) return;
+    setLocalError('');
+    setBusyChoice(choice);
+    try {
+      await fn();
+    } catch (err) {
+      setLocalError(
+        err?.message || 'Could not resolve sync conflict. Please try again.',
+      );
+    } finally {
+      setBusyChoice(null);
+    }
+  }
+
+  function handleDismiss() {
+    if (busyChoice !== null) return;
+    onClose();
+  }
+
+  const titleText = isAccountSwitch
+    ? 'Different Google Account Detected'
+    : isRemoteDeleted
+      ? 'Cloud Data Deleted on Another Device'
+      : 'Cloud Sync Version Conflict';
+
   return (
-    <div className="modal-backdrop" onClick={onClose}>
+    <div className="modal-backdrop" onClick={handleDismiss}>
       <div
         className="modal-panel"
         style={{ maxWidth: '470px' }}
@@ -301,15 +332,12 @@ export function SyncConflictModal({
         onClick={(e) => e.stopPropagation()}
       >
         <div className="modal-header">
-          <h2 id="sync-conflict-title">
-            {isAccountSwitch
-              ? 'Different Google Account Detected'
-              : 'Cloud Sync Version Conflict'}
-          </h2>
+          <h2 id="sync-conflict-title">{titleText}</h2>
           <button
             type="button"
             className="modal-close"
-            onClick={onClose}
+            disabled={busyChoice !== null}
+            onClick={handleDismiss}
             aria-label="Close conflict dialog"
           >
             ×
@@ -317,6 +345,12 @@ export function SyncConflictModal({
         </div>
 
         <div className="modal-body">
+          {localError && (
+            <p role="alert" style={{ color: 'var(--danger-fg)', fontWeight: 600 }}>
+              {localError}
+            </p>
+          )}
+
           {isAccountSwitch ? (
             <>
               <p>
@@ -343,9 +377,14 @@ export function SyncConflictModal({
                     id="resolve-use-remote-btn"
                     type="button"
                     className="btn btn-primary btn-sm"
-                    onClick={onUseRemote}
+                    disabled={busyChoice !== null}
+                    onClick={() => runResolution('use-remote', onUseRemote)}
                   >
-                    {remoteState ? 'Load Cloud' : 'Start Fresh'}
+                    {busyChoice === 'use-remote'
+                      ? 'Loading…'
+                      : remoteState
+                        ? 'Load Cloud'
+                        : 'Start Fresh'}
                   </button>
                 </div>
 
@@ -360,9 +399,60 @@ export function SyncConflictModal({
                     id="resolve-keep-local-btn"
                     type="button"
                     className="btn btn-sm"
-                    onClick={onKeepLocal}
+                    disabled={busyChoice !== null}
+                    onClick={() => runResolution('keep-local', onKeepLocal)}
                   >
-                    Keep Local
+                    {busyChoice === 'keep-local' ? 'Saving…' : 'Keep Local'}
+                  </button>
+                </div>
+              </div>
+            </>
+          ) : isRemoteDeleted ? (
+            <>
+              <p>
+                Saved cloud courses for this Google account were permanently erased
+                from another device. Would you like to sign out and clear this
+                browser, or re-upload this device&apos;s courses to Google Cloud?
+              </p>
+
+              <div className="data-actions-grid" style={{ marginBottom: '0.6rem' }}>
+                <div className="data-action-row">
+                  <div className="data-action-info">
+                    <strong>Sign Out &amp; Clear This Device</strong>
+                    <span>
+                      Erase cached grades in this browser to match cloud deletion
+                    </span>
+                  </div>
+                  <button
+                    id="resolve-use-remote-btn"
+                    type="button"
+                    className="btn btn-primary btn-sm"
+                    disabled={busyChoice !== null}
+                    onClick={() => runResolution('use-remote', onUseRemote)}
+                  >
+                    {busyChoice === 'use-remote'
+                      ? 'Signing out…'
+                      : 'Sign Out & Clear'}
+                  </button>
+                </div>
+
+                <div className="data-action-row">
+                  <div className="data-action-info">
+                    <strong>Re-Upload This Device&apos;s Courses</strong>
+                    <span>
+                      Updated locally: {formatLastUpdated(localState?.lastUpdated)}
+                    </span>
+                  </div>
+                  <button
+                    id="resolve-keep-local-btn"
+                    type="button"
+                    className="btn btn-sm"
+                    disabled={busyChoice !== null}
+                    onClick={() => runResolution('keep-local', onKeepLocal)}
+                  >
+                    {busyChoice === 'keep-local'
+                      ? 'Uploading…'
+                      : 'Re-Upload Courses'}
                   </button>
                 </div>
               </div>
@@ -370,7 +460,7 @@ export function SyncConflictModal({
           ) : (
             <>
               <p>
-                {conflict?.reason === 'initial-merge'
+                {reason === 'initial-merge'
                   ? 'Your Google account already has saved courses in the cloud, and this browser also has local edits. Which version would you like to use?'
                   : 'Your courses were updated from another device while this browser had unsynced changes. Which version would you like to keep?'}
               </p>
@@ -387,9 +477,12 @@ export function SyncConflictModal({
                     id="resolve-use-remote-btn"
                     type="button"
                     className="btn btn-primary btn-sm"
-                    onClick={onUseRemote}
+                    disabled={busyChoice !== null}
+                    onClick={() => runResolution('use-remote', onUseRemote)}
                   >
-                    Load Cloud Version
+                    {busyChoice === 'use-remote'
+                      ? 'Loading…'
+                      : 'Load Cloud Version'}
                   </button>
                 </div>
 
@@ -404,9 +497,10 @@ export function SyncConflictModal({
                     id="resolve-keep-local-btn"
                     type="button"
                     className="btn btn-sm"
-                    onClick={onKeepLocal}
+                    disabled={busyChoice !== null}
+                    onClick={() => runResolution('keep-local', onKeepLocal)}
                   >
-                    Keep This Device
+                    {busyChoice === 'keep-local' ? 'Saving…' : 'Keep This Device'}
                   </button>
                 </div>
               </div>
