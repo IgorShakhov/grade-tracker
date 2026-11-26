@@ -15,29 +15,52 @@ import {
 } from 'firebase/firestore/lite';
 
 /**
- * Public Firebase web configuration for Grade Tracker.
- * Security is enforced server-side via Firestore Security Rules (`firestore.rules`)
- * and Firebase Authentication Authorized Domains.
+ * Resolves public Firebase Web App config from Vite build-time `VITE_FIREBASE_*`
+ * environment variables (injected via GitHub Actions Secrets in CI or `.env.local` in dev).
+ * Security is enforced server-side via `firestore.rules` and Firebase Auth Authorized Domains.
  */
-export const FIREBASE_CONFIG = {
-  apiKey: 'AIzaSyDAHUYYcqXnMxHdfK20u8yk_X-SeWQM9Rg',
-  authDomain: 'grade-tracker-sync.firebaseapp.com',
-  projectId: 'grade-tracker-sync',
-  storageBucket: 'grade-tracker-sync.firebasestorage.app',
-  messagingSenderId: '273653231170',
-  appId: '1:273653231170:web:773ca39e4b584d61e187db',
-};
+export function resolveFirebaseConfig(env = import.meta.env) {
+  const source = env || {};
+  return {
+    apiKey: String(source.VITE_FIREBASE_API_KEY || '').trim(),
+    authDomain: String(source.VITE_FIREBASE_AUTH_DOMAIN || '').trim(),
+    projectId: String(source.VITE_FIREBASE_PROJECT_ID || '').trim(),
+    storageBucket: String(source.VITE_FIREBASE_STORAGE_BUCKET || '').trim(),
+    messagingSenderId: String(source.VITE_FIREBASE_MESSAGING_SENDER_ID || '').trim(),
+    appId: String(source.VITE_FIREBASE_APP_ID || '').trim(),
+  };
+}
+
+export const FIREBASE_CONFIG = resolveFirebaseConfig();
+
+export function isFirebaseConfigComplete(config = FIREBASE_CONFIG) {
+  return Boolean(
+    config &&
+      config.apiKey &&
+      config.authDomain &&
+      config.projectId &&
+      config.appId,
+  );
+}
 
 let cachedServices = null;
 
 /**
  * Lazily initializes Firebase Auth + Firestore Lite (`firebase/firestore/lite`).
- * Firestore Lite is stateless (zero IndexedDB persistence on disk — `E3`) and
- * dramatically smaller than the full WebChannel bundle for fast mobile loads.
+ * Throws a tagged `firebase/not-configured` error when `VITE_FIREBASE_*` env vars are absent
+ * so the app stays cleanly in offline `localStorage` mode on unconfigured local clones.
  */
 export function getFirebaseServices() {
   if (cachedServices) {
     return cachedServices;
+  }
+
+  if (!isFirebaseConfigComplete(FIREBASE_CONFIG)) {
+    const err = new Error(
+      'Cloud sync is not configured in this build. Copy .env.example to .env.local with your VITE_FIREBASE_* values.',
+    );
+    err.code = 'firebase/not-configured';
+    throw err;
   }
 
   const app = getApps().length > 0 ? getApp() : initializeApp(FIREBASE_CONFIG);

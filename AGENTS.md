@@ -18,6 +18,7 @@ Read this file and [`docs/ROADMAP.md`](docs/ROADMAP.md) first before modifying t
 
 ```text
 .
+├── .env.example                      # Template for VITE_FIREBASE_* build-time env vars (.env.local gitignored)
 ├── index.html                        # Entry HTML, no-referrer policy, Google Fonts, SVG icon
 ├── firestore.rules                   # Hardened Firestore v2 security rules (users/{uid} & shares/{token})
 ├── vite.config.js                    # Vite build (base: './') + Vitest jsdom config
@@ -31,7 +32,7 @@ Read this file and [`docs/ROADMAP.md`](docs/ROADMAP.md) first before modifying t
 │   │   └── operations.js             # Pure immutable helpers: reorder, moveCourseToTerm, duplicateCourseInTerm, collapseAll
 │   ├── services/
 │   │   ├── storage.js                # validateTrackerState, StorageService (localStorage + registerCloudAdapter hook)
-│   │   ├── firebase.js               # Public firebaseConfig + lazy Auth (Google popup) & stateless Firestore Lite init
+│   │   ├── firebase.js               # VITE_FIREBASE_* env resolver + lazy Auth (Google popup) & stateless Firestore Lite init
 │   │   ├── cloudSync.js              # CloudSyncManager: Google Auth, atomic writeBatch sync, rev concurrency, #view shares
 │   │   └── share.js                  # CompressionStream ('z1.') / base64url ('u1.') point-in-time URL snapshot codec
 │   ├── components/

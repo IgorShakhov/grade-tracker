@@ -13,6 +13,10 @@ import {
   clearLiveViewFromUrl,
   fetchSharedView,
 } from '../../src/services/cloudSync.js';
+import {
+  resolveFirebaseConfig,
+  isFirebaseConfigComplete,
+} from '../../src/services/firebase.js';
 
 const SERVER_TS_SENTINEL = Symbol('serverTimestamp');
 
@@ -528,6 +532,42 @@ describe('CloudSyncManager & Firestore Security Rules Invariants (cloudSync.js)'
     expect(mgr.getSnapshot().status).toBe('conflict');
     expect(mgr.getSnapshot().conflict.reason).toBe('account-switch');
 
+    mgr.stop();
+  });
+
+  it('resolves VITE_FIREBASE_* env vars and stays quietly in local-only mode when unconfigured (#18)', async () => {
+    const emptyCfg = resolveFirebaseConfig({});
+    expect(isFirebaseConfigComplete(emptyCfg)).toBe(false);
+
+    const fullCfg = resolveFirebaseConfig({
+      VITE_FIREBASE_API_KEY: ' key-123 ',
+      VITE_FIREBASE_AUTH_DOMAIN: 'proj.firebaseapp.com',
+      VITE_FIREBASE_PROJECT_ID: 'proj',
+      VITE_FIREBASE_APP_ID: '1:1:web:1',
+    });
+    expect(fullCfg.apiKey).toBe('key-123');
+    expect(isFirebaseConfigComplete(fullCfg)).toBe(true);
+
+    const mem = createMemoryStorage();
+    const storageSvc = new StorageService({ storage: mem });
+    const unconfiguredFactory = () => {
+      const err = new Error('Not configured');
+      err.code = 'firebase/not-configured';
+      throw err;
+    };
+
+    const mgr = new CloudSyncManager({
+      firebaseFactory: unconfiguredFactory,
+      storage: mem,
+      storageSvc,
+    });
+    mgr.start();
+    // Must stay cleanly disconnected with no startup error banner
+    expect(mgr.getSnapshot().status).toBe('disconnected');
+    expect(mgr.getSnapshot().error).toBeNull();
+
+    // Explicit sign-in surfaces clear setup guidance
+    await expect(mgr.signInWithGoogle()).rejects.toThrow(/\.env\.local/i);
     mgr.stop();
   });
 });
