@@ -437,12 +437,20 @@ export class StorageService {
     }
   }
 
-  save(state, { touchTimestamp = true } = {}) {
+  /**
+   * Pure state validator/normalizer with zero storage, cloud, or listener side effects,
+   * safe to call inside React `<StrictMode>` state updaters (#14).
+   */
+  prepareForSave(state, { touchTimestamp = true, nowIso = new Date().toISOString() } = {}) {
     const cloned = this.validateAndMigrate(state);
-    const nextState = {
+    return {
       ...cloned,
-      lastUpdated: touchTimestamp ? new Date().toISOString() : cloned.lastUpdated,
+      lastUpdated: touchTimestamp ? nowIso : cloned.lastUpdated,
     };
+  }
+
+  save(state, { touchTimestamp = true, notifyListeners = true } = {}) {
+    const nextState = this.prepareForSave(state, { touchTimestamp });
 
     this.saveLocalOnly(nextState);
 
@@ -456,7 +464,9 @@ export class StorageService {
         });
     }
 
-    this.notify(nextState);
+    if (notifyListeners) {
+      this.notify(nextState);
+    }
     return cloneState(nextState);
   }
 
