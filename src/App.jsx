@@ -115,6 +115,7 @@ export default function App() {
     past: [],
     future: [],
     localSaveSeq: 0,
+    needsPersist: false,
   }));
   const state = doc.current;
   const stateRef = useRef(state);
@@ -166,11 +167,14 @@ export default function App() {
         past: [],
         future: [],
         localSaveSeq: prev.localSaveSeq || 0,
+        needsPersist: false,
       }));
     });
     const unsubSync = cloudSyncManager.subscribe((nextSnap) => {
       setSyncSnapshot(nextSnap);
-      if (nextSnap.status !== 'conflict') {
+      if (nextSnap.status === 'conflict') {
+        setShowSyncModal(false);
+      } else {
         setConflictDismissed(false);
       }
     });
@@ -288,12 +292,14 @@ export default function App() {
   useEffect(() => {
     if (doc.localSaveSeq > lastPersistedSeqRef.current) {
       lastPersistedSeqRef.current = doc.localSaveSeq;
-      storageService.save(doc.current, {
-        touchTimestamp: false,
-        notifyListeners: false,
-      });
+      if (doc.needsPersist) {
+        storageService.save(doc.current, {
+          touchTimestamp: false,
+          notifyListeners: false,
+        });
+      }
     }
-  }, [doc.localSaveSeq, doc.current]);
+  }, [doc.localSaveSeq, doc.needsPersist, doc.current]);
 
   const updateCurrentWithoutHistory = useCallback(
     (updater, { touchTimestamp = false } = {}) => {
@@ -317,6 +323,7 @@ export default function App() {
           ...prev,
           current: prepared,
           localSaveSeq: (prev.localSaveSeq || 0) + 1,
+          needsPersist: true,
         };
       });
     },
@@ -361,6 +368,7 @@ export default function App() {
             : [...prev.past.slice(-(MAX_HISTORY - 1)), prev.current],
           future: [],
           localSaveSeq: (prev.localSaveSeq || 0) + 1,
+          needsPersist: true,
         };
       });
     },
@@ -383,6 +391,7 @@ export default function App() {
         past: prev.past.slice(0, -1),
         future: [prev.current, ...prev.future.slice(0, MAX_HISTORY - 1)],
         localSaveSeq: (prev.localSaveSeq || 0) + 1,
+        needsPersist: true,
       };
     });
     showToast('Undid last change.');
@@ -404,6 +413,7 @@ export default function App() {
         past: [...prev.past.slice(-(MAX_HISTORY - 1)), prev.current],
         future: remainingFuture,
         localSaveSeq: (prev.localSaveSeq || 0) + 1,
+        needsPersist: true,
       };
     });
     showToast('Redid change.');
@@ -487,6 +497,7 @@ export default function App() {
         past: [...prev.past.slice(-(MAX_HISTORY - 1)), prev.current],
         future: [],
         localSaveSeq: (prev.localSaveSeq || 0) + 1,
+        needsPersist: true,
       };
     });
     clearShareParamsFromCurrentUrl(window);
@@ -529,6 +540,7 @@ export default function App() {
       past: [],
       future: [],
       localSaveSeq: prev.localSaveSeq || 0,
+      needsPersist: false,
     }));
     setShowSyncModal(false);
     showToast('Signed out and cleared local cached grades.');
@@ -536,8 +548,8 @@ export default function App() {
   }
 
   async function handleDeleteCloudData() {
-    await cloudSyncManager.deleteCloudData();
-    if (cloudSyncManager.getSnapshot().user) {
+    const deleted = await cloudSyncManager.deleteCloudData();
+    if (!deleted) {
       return;
     }
     lastCoalesceRef.current = { key: null, time: 0 };
@@ -547,6 +559,7 @@ export default function App() {
       past: [],
       future: [],
       localSaveSeq: prev.localSaveSeq || 0,
+      needsPersist: false,
     }));
     setShowSyncModal(false);
     showToast('Deleted cloud data and cleared local browser cache.');
@@ -1179,6 +1192,7 @@ export default function App() {
                 past: [],
                 future: [],
                 localSaveSeq: prev.localSaveSeq || 0,
+                needsPersist: false,
               }));
               if (reason === 'remote-deleted' || !snap?.user) {
                 showToast('Signed out and cleared local cached grades.');

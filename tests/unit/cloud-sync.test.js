@@ -1048,5 +1048,86 @@ describe('CloudSyncManager & Firestore Security Rules Invariants (cloudSync.js)'
     dev1.stop();
     dev2.stop();
   });
+
+  it('preserves unreconciled custom local course protection when initial push fails and converges multi-tab sign-ins cleanly (Cluster 2 QA)', async () => {
+    // 1. Pre-existing local courses + initial push fails -> signOutUser MUST still require confirmation!
+    const fb1 = createRulesEnforcingFirebaseMock();
+    const origBatch = fb1.service.writeBatch;
+    fb1.service.writeBatch = () => {
+      const b = origBatch();
+      b.commit = async () => {
+        const err = new Error('Quota');
+        err.code = 'resource-exhausted';
+        throw err;
+      };
+      return b;
+    };
+
+    const mem1 = createMemoryStorage();
+    const customLocal = createInitialState();
+    customLocal.studentName = 'Pre-Existing Custom';
+    mem1.setItem(STORAGE_KEY, JSON.stringify(customLocal));
+
+    const svc1 = new StorageService({ storage: mem1 });
+    const mgr1 = new CloudSyncManager({
+      firebaseFactory: () => fb1.service,
+      storage: mem1,
+      storageSvc: svc1,
+    });
+    mgr1.start();
+
+    fb1.setPopupUser({ uid: 'user-1', email: 's@example.com' });
+    await expect(mgr1.signInWithGoogle()).rejects.toThrow(/quota/i);
+    expect(mgr1.meta.lastSyncedUid).toBeNull();
+    expect(mgr1.getSnapshot().status).toBe('error');
+
+    const signOutRes = await mgr1.signOutUser();
+    expect(signOutRes).toEqual({ signedOut: false, requiresDiscardConfirm: true });
+    expect(svc1.load().studentName).toBe('Pre-Existing Custom');
+    mgr1.stop();
+
+    // 2. Multi-tab concurrent first-time sign-in with identical state converges both tabs to `synced`
+    const fbMulti = createRulesEnforcingFirebaseMock();
+    const sharedMem = createMemoryStorage();
+    const t1Svc = new StorageService({ storage: sharedMem });
+    const t2Svc = new StorageService({ storage: sharedMem });
+    const tab1 = new CloudSyncManager({
+      firebaseFactory: () => fbMulti.service,
+      storage: sharedMem,
+      storageSvc: t1Svc,
+    });
+    const tab2 = new CloudSyncManager({
+      firebaseFactory: () => fbMulti.service,
+      storage: sharedMem,
+      storageSvc: t2Svc,
+    });
+    tab1.start();
+    tab2.start();
+
+    fbMulti.setPopupUser({ uid: 'user-multi', email: 'm@example.com' });
+    await tab1.signInWithGoogle();
+    if (tab2.reconcilePromise) await tab2.reconcilePromise;
+    expect(tab1.getSnapshot().status).toBe('synced');
+    expect(tab2.getSnapshot().status).toBe('synced');
+    expect(tab2.getSnapshot().conflict).toBeNull();
+
+    // 3. Resolving a conflict in Tab 1 clears stale conflict state in Tab 2 via SYNC_META_KEY storage event
+    tab2.status = 'conflict';
+    tab2.conflict = {
+      reason: 'rev-mismatch',
+      remoteState: createInitialState(),
+      remoteRev: 1,
+      remoteShareToken: null,
+    };
+    tab2.handleExternalStorageEvent({
+      key: SYNC_META_KEY,
+      newValue: sharedMem.getItem(SYNC_META_KEY),
+    });
+    expect(tab2.getSnapshot().status).toBe('synced');
+    expect(tab2.getSnapshot().conflict).toBeNull();
+
+    tab1.stop();
+    tab2.stop();
+  });
 });
 
