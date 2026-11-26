@@ -22,6 +22,7 @@ If you are an AI coding assistant (Antigravity, Cursor, Claude Code, Copilot, et
 - **Undo / Redo & Safe Deletions**: Multi-step Undo/Redo history (`Ctrl/Cmd+Z` / `Ctrl/Cmd+Shift+Z`) paired with confirmation dialogs for term/course deletions and 2-click inline confirmation for assessment rows.
 - **Remaining-Weight Target Grade Calculator**: Select a desired target percentage to see the exact average required across remaining ungraded coursework.
 - **Configurable Grading Scale**: Supports standard 4.0 GPA scales and customizable percentage-to-GPA/letter-grade thresholds.
+- **GitHub Multi-Device Cloud Sync**: Optional 1-minute setup using a GitHub Fine-Grained Personal Access Token to auto-sync profiles (`data/<profileId>.json`) to a dedicated `grade-data` branch—plus zero-token **Live Read-Only View Links** (`?profile=<profileId>`).
 - **Compressed Read-Only Share Snapshot Links**: Generate compact, URL-encoded read-only snapshots to share progress across devices or with family and peers.
 - **JSON Backup & Excel UTF-8 CSV Export**: Export and restore full state snapshots as JSON, or download UTF-8 BOM CSV spreadsheets ready for Microsoft Excel.
 
@@ -51,25 +52,10 @@ Deployment to GitHub Pages is automated via [`.github/workflows/deploy.yml`](.gi
 2. In your GitHub repository, go to **Settings → Pages → Build and deployment → Source** and select **GitHub Actions**.
 3. Every push to `main` (or manual `workflow_dispatch` trigger) runs `npm ci`, `npm test`, and `npm run build`, then publishes `./dist` to GitHub Pages.
 
-## Cloud Sync Adapter Architecture
+## GitHub Multi-Device Sync (`grade-data` Branch)
 
-Grade Tracker persists all state offline-first in `localStorage` via `StorageService` in [`src/services/storage.js`](src/services/storage.js), and exposes `registerCloudAdapter(adapter)` for optional remote synchronization:
+Grade Tracker persists all state offline-first in `localStorage` via [`src/services/storage.js`](src/services/storage.js) and includes a built-in GitHub Contents API sync engine in [`src/services/githubSync.js`](src/services/githubSync.js):
 
-- **Local-First Writes**: `StorageService.save()` validates and normalizes state, writes immediately to `localStorage`, notifies subscribed UI listeners, and asynchronously invokes `adapter.save(snapshot)` if a cloud adapter is registered (cloud failures never block local persistence).
-- **Remote Updates**: If the adapter implements `subscribe(callback)`, incoming remote states are validated, persisted locally, and broadcast to the UI.
-- **Pluggable Backends**: An adapter is a plain object implementing `{ load?, save?, subscribe?, signIn?, signOut?, getUser? }`. See Milestone 2 in [`docs/ROADMAP.md`](docs/ROADMAP.md) for the planned GitHub `grades.json` sync design:
-
-```js
-import { registerCloudAdapter } from './src/services/storage.js';
-
-registerCloudAdapter({
-  async save(state) {
-    // Persist JSON.stringify(state) to GitHub Contents API / Gist API
-    // using a Fine-Grained Personal Access Token
-  },
-  subscribe(onRemoteState) {
-    // Optionally poll or listen for remote updates and call onRemoteState(parsedJson)
-    return () => {};
-  },
-});
-```
+- **Dedicated `grade-data` Branch**: Synced profiles are stored at `data/<profileId>.json` on an orphan `grade-data` branch so `main` stays 100% pure application code and grade edits never trigger GitHub Actions Pages rebuilds.
+- **One-Time Setup**: Click **Cloud Sync** in the header, generate or enter a `profileId`, and paste a GitHub Fine-Grained Personal Access Token scoped **only** to your `grade-tracker` repository with `Contents: Read and write` permission (stored only in browser `localStorage`).
+- **Zero-Token Live View**: Share or bookmark `https://<owner>.github.io/<repo>/?profile=<profileId>` to view always-current grades in read-only mode without needing a token.

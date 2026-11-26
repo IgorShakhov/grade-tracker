@@ -157,4 +157,15 @@ describe('Grade Tracker React Application (M1 + M1.1 + Undo/Redo & Confirmations
     expect(afterInputs.some((el) => el.value === '12.50' || el.value === '98.00')).toBe(false);
     expect(window.localStorage.getItem('grade_tracker_v1')).toBe(savedBefore);
   });
+
+  it('opens the GitHub Cloud Sync configuration dialog from the toolbar and validates required fields (Milestone 2)', () => {
+    render(<App />);
+    fireEvent.click(screen.getByRole('button', { name: /Cloud Sync/i }));
+    const dialog = screen.getByRole('dialog', { name: /GitHub Cloud Sync/i });
+    expect(dialog).toBeInTheDocument();
+    expect(within(dialog).getByLabelText(/Data Branch/i)).toHaveValue('grade-data');
+
+    fireEvent.click(within(dialog).getByRole('button', { name: /Connect & Sync/i }));
+    expect(within(dialog).getByText(/Enter a valid GitHub repository/i)).toBeInTheDocument();
+  });
 });

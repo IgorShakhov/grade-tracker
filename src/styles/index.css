@@ -1456,6 +1456,112 @@ body {
   background: hsla(0, 0%, 100%, 0.28);
 }
 
+/* Cloud Sync Status & Modal Form */
+.sync-pill-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.38rem;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-xs);
+  padding: 0.1rem 0.4rem;
+  margin: -0.1rem -0.2rem;
+  font-family: var(--font-sans);
+  font-size: 0.8rem;
+  font-weight: 500;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background-color var(--transition-fast), border-color var(--transition-fast);
+}
+
+.sync-pill-btn:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-default);
+  color: var(--text-primary);
+}
+
+.sync-indicator.status-synced { background: hsl(152, 58%, 38%); }
+.sync-indicator.status-syncing { background: hsl(212, 78%, 48%); }
+.sync-indicator.status-pending,
+.sync-indicator.status-offline { background: hsl(35, 88%, 46%); }
+.sync-indicator.status-conflict,
+.sync-indicator.status-error { background: hsl(356, 68%, 46%); }
+.sync-indicator.status-disconnected { background: hsl(215, 16%, 62%); }
+
+.sync-form-grid {
+  display: grid;
+  gap: 0.78rem;
+  margin-bottom: 0.95rem;
+}
+
+.sync-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.26rem;
+}
+
+.sync-field label {
+  font-size: 0.76rem;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.sync-field-hint {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
+
+.sync-input-row {
+  display: flex;
+  gap: 0.42rem;
+}
+
+.sync-text-input {
+  width: 100%;
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  padding: 0.46rem 0.62rem;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface);
+  color: var(--text-primary);
+}
+
+.sync-text-input:focus {
+  outline: none;
+  border-color: var(--navy-700);
+  box-shadow: 0 0 0 3px var(--focus-ring);
+}
+
+.sync-connected-box {
+  padding: 0.75rem 0.88rem;
+  border-radius: var(--radius-sm);
+  background: hsl(152, 42%, 95%);
+  border: 1px solid hsl(152, 34%, 80%);
+  margin-bottom: 0.9rem;
+  font-size: 0.8rem;
+  color: hsl(154, 58%, 20%);
+}
+
+.sync-help-box {
+  padding: 0.68rem 0.82rem;
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface-subtle);
+  border: 1px solid var(--border-subtle);
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  margin-bottom: 0.85rem;
+}
+
+.sync-help-box ol {
+  margin: 0.35rem 0 0;
+  padding-left: 1.15rem;
+}
+
+.sync-help-box li {
+  margin-bottom: 0.2rem;
+}
+
 /* ==========================================================================
    Responsive Breakpoints & Print
    ========================================================================== */

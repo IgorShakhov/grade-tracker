@@ -1,9 +1,36 @@
 import { formatGpa, formatPercent, formatLastUpdated } from '../domain/calculations.js';
 
+function getSyncLabel(readOnlyMode, syncStatus) {
+  if (readOnlyMode === 'live-profile') {
+    return { text: 'Live Shared View (GitHub)', dotClass: 'status-synced' };
+  }
+  if (readOnlyMode === 'snapshot') {
+    return { text: 'Read-Only Shared Snapshot', dotClass: 'status-synced' };
+  }
+  switch (syncStatus) {
+    case 'synced':
+      return { text: 'Synced to GitHub', dotClass: 'status-synced' };
+    case 'syncing':
+      return { text: 'Syncing…', dotClass: 'status-syncing' };
+    case 'pending':
+      return { text: 'Changes pending sync…', dotClass: 'status-pending' };
+    case 'offline':
+      return { text: 'Offline · Saved locally', dotClass: 'status-offline' };
+    case 'conflict':
+      return { text: 'Sync conflict — click to resolve', dotClass: 'status-conflict' };
+    case 'error':
+      return { text: 'Sync error — click to inspect', dotClass: 'status-error' };
+    default:
+      return { text: 'Local only · Set up Sync', dotClass: 'status-disconnected' };
+  }
+}
+
 export default function HeaderLedger({
   studentName,
   lastUpdated,
   readOnly,
+  readOnlyMode,
+  syncStatus,
   simMode,
   simCount,
   stats,
@@ -15,6 +42,7 @@ export default function HeaderLedger({
   onRedo,
   onChangeName,
   onToggleSimMode,
+  onOpenSync,
   onOpenShare,
   onOpenData,
 }) {
@@ -23,6 +51,8 @@ export default function HeaderLedger({
     !studentName || studentName.trim().toLowerCase() === 'my'
       ? 'Grade Tracker'
       : "'s Grade Tracker";
+
+  const syncInfo = getSyncLabel(readOnlyMode, syncStatus);
 
   return (
     <header className="site-header">
@@ -49,10 +79,19 @@ export default function HeaderLedger({
               <p className="meta-subtitle">
                 <span>Last Update: {formatLastUpdated(lastUpdated)}</span>
                 <span className="meta-dot">•</span>
-                <span className="sync-pill">
-                  <span className="sync-indicator" aria-hidden="true" />
-                  {readOnly ? 'Read-Only Shared View' : 'Saved locally'}
-                </span>
+                <button
+                  id="sync-status-pill-btn"
+                  type="button"
+                  className="sync-pill-btn"
+                  onClick={onOpenSync}
+                  title="Configure GitHub multi-device sync"
+                >
+                  <span
+                    className={`sync-indicator ${syncInfo.dotClass}`}
+                    aria-hidden="true"
+                  />
+                  <span>{syncInfo.text}</span>
+                </button>
               </p>
             </div>
           </div>
@@ -88,11 +127,20 @@ export default function HeaderLedger({
               type="button"
               className={`btn ${simMode ? 'btn-sim-active' : ''}`}
               onClick={onToggleSimMode}
-              title="Test hypothetical scores on ungraded assessments without overwriting saved grades"
+              title="Test hypothetical scores in a sandbox without overwriting saved grades"
             >
               {simMode
                 ? `What-If Active${simCount > 0 ? ` (${simCount})` : ''}`
                 : 'What-If Simulator'}
+            </button>
+
+            <button
+              id="open-sync-btn"
+              type="button"
+              className="btn"
+              onClick={onOpenSync}
+            >
+              Cloud Sync
             </button>
 
             <button
