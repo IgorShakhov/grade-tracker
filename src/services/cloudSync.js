@@ -258,6 +258,39 @@ function sanitizeUserForMemory(firebaseUser) {
 }
 
 /**
+ * Produces a deterministic content fingerprint of a validated TrackerState,
+ * ignoring volatile metadata (`lastUpdated`, generated IDs, `activeTermId`, `collapsed`)
+ * so untouched sample states and identical trackers compare equal (#13).
+ */
+export function canonicalTrackerFingerprint(rawState) {
+  const s = validateTrackerState(rawState);
+  return JSON.stringify({
+    studentName: s.studentName,
+    gradeScale: s.gradeScale.map((b) => [b.min, b.max, b.letter, b.gpa]),
+    terms: s.terms.map((t) => ({
+      name: t.name,
+      courses: t.courses.map((c) => ({
+        code: c.code,
+        title: c.title,
+        units: c.units,
+        duration: c.duration,
+        passFail: c.passFail,
+        targetPct: c.targetPct,
+        categories: c.categories.map((cat) => [cat.name, cat.weight, cat.grade]),
+      })),
+    })),
+  });
+}
+
+export function areTrackerStatesEquivalent(stateA, stateB) {
+  try {
+    return canonicalTrackerFingerprint(stateA) === canonicalTrackerFingerprint(stateB);
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Fetches and strictly validates a read-only shared view (`shares/{token}`).
  * Works without signing in when the caller knows the exact 192-bit token.
  */
@@ -661,7 +694,11 @@ export class CloudSyncManager {
 
       // Case B: Never synced on this browser before (`lastSyncedUid === null`)
       if (!lastSyncedUid) {
-        if (dirty) {
+        const hasCustomLocalData =
+          dirty || !areTrackerStatesEquivalent(localState, createInitialState());
+        const differsFromRemote = !areTrackerStatesEquivalent(localState, remoteState);
+
+        if (hasCustomLocalData && differsFromRemote) {
           this.status = 'conflict';
           this.conflict = {
             reason: 'initial-merge',

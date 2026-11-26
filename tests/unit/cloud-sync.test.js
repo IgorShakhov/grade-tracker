@@ -783,4 +783,61 @@ describe('CloudSyncManager & Firestore Security Rules Invariants (cloudSync.js)'
 
     mgr.stop();
   });
+
+  it('protects pre-existing non-default local courses on first sign-in while auto-loading over untouched sample (#13)', async () => {
+    const fbMock = createRulesEnforcingFirebaseMock();
+    const cloudCourses = createInitialState();
+    cloudCourses.studentName = 'Cloud Saved';
+    fbMock.seedDirect('users/user-1', {
+      stateJson: JSON.stringify(cloudCourses),
+      updatedAt: 'ts-cloud',
+      rev: 1,
+      shareToken: null,
+    });
+
+    // 1. Pre-PR #8 browser: local storage has real custom courses, NO sync metadata (`dirty: false`, `lastSyncedUid: null`)
+    const mem1 = createMemoryStorage();
+    const preExistingLocal = createInitialState();
+    preExistingLocal.studentName = 'Pre-PR8 Custom Courses';
+    preExistingLocal.terms[0].courses[0].code = 'PHYS201';
+    mem1.setItem(STORAGE_KEY, JSON.stringify(preExistingLocal));
+
+    const storageSvc1 = new StorageService({ storage: mem1 });
+    const mgr1 = new CloudSyncManager({
+      firebaseFactory: () => fbMock.service,
+      storage: mem1,
+      storageSvc: storageSvc1,
+    });
+    mgr1.start();
+
+    fbMock.setPopupUser({ uid: 'user-1', email: 's@example.com' });
+    const snap1 = await mgr1.signInWithGoogle();
+    expect(snap1.status).toBe('conflict');
+    expect(snap1.conflict.reason).toBe('initial-merge');
+    // Local courses must remain untouched until user chooses!
+    expect(storageSvc1.load().studentName).toBe('Pre-PR8 Custom Courses');
+    expect(storageSvc1.load().terms[0].courses[0].code).toBe('PHYS201');
+    mgr1.stop();
+
+    // 2. Fresh secondary device: untouched default sample (even with older timestamp & collapsed card) -> auto-pulls silently!
+    const mem2 = createMemoryStorage();
+    const untouchedSample = createInitialState();
+    untouchedSample.lastUpdated = '2025-01-01T00:00:00.000Z';
+    untouchedSample.terms[0].courses[0].collapsed = true;
+    mem2.setItem(STORAGE_KEY, JSON.stringify(untouchedSample));
+
+    const storageSvc2 = new StorageService({ storage: mem2 });
+    const mgr2 = new CloudSyncManager({
+      firebaseFactory: () => fbMock.service,
+      storage: mem2,
+      storageSvc: storageSvc2,
+    });
+    mgr2.start();
+
+    const snap2 = await mgr2.signInWithGoogle();
+    expect(snap2.status).toBe('synced');
+    expect(snap2.conflict).toBeNull();
+    expect(storageSvc2.load().studentName).toBe('Cloud Saved');
+    mgr2.stop();
+  });
 });
