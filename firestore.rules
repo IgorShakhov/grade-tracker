@@ -14,9 +14,15 @@ service cloud.firestore {
           || d.shareToken == null
           || validToken(d.shareToken);
     }
+    function shareExistsForOwner(token, uid) {
+      return getAfter(/databases/$(database)/documents/shares/$(token)).data.ownerUid == uid;
+    }
+    function shareAbsentAfter(token) {
+      return !existsAfter(/databases/$(database)/documents/shares/$(token));
+    }
 
     match /users/{uid} {
-      allow get, delete: if signedIn() && request.auth.uid == uid;
+      allow get: if signedIn() && request.auth.uid == uid;
       allow list: if false;
 
       allow create: if signedIn() && request.auth.uid == uid
@@ -25,7 +31,9 @@ service cloud.firestore {
         && validState(request.resource.data)
         && request.resource.data.rev is int
         && request.resource.data.rev == 1
-        && validOptionalShareToken(request.resource.data);
+        && validOptionalShareToken(request.resource.data)
+        && (request.resource.data.get('shareToken', null) == null
+            || shareExistsForOwner(request.resource.data.shareToken, uid));
 
       allow update: if signedIn() && request.auth.uid == uid
         && request.resource.data.keys().hasAll(['stateJson', 'updatedAt', 'rev'])
@@ -33,7 +41,16 @@ service cloud.firestore {
         && validState(request.resource.data)
         && request.resource.data.rev is int
         && request.resource.data.rev == resource.data.rev + 1
-        && validOptionalShareToken(request.resource.data);
+        && validOptionalShareToken(request.resource.data)
+        && (request.resource.data.get('shareToken', null) == null
+            || shareExistsForOwner(request.resource.data.shareToken, uid))
+        && (resource.data.get('shareToken', null) == null
+            || resource.data.get('shareToken', null) == request.resource.data.get('shareToken', null)
+            || shareAbsentAfter(resource.data.shareToken));
+
+      allow delete: if signedIn() && request.auth.uid == uid
+        && (resource.data.get('shareToken', null) == null
+            || shareAbsentAfter(resource.data.shareToken));
     }
 
     match /shares/{token} {
@@ -55,7 +72,9 @@ service cloud.firestore {
         && validState(request.resource.data)
         && getAfter(/databases/$(database)/documents/users/$(request.auth.uid)).data.shareToken == token;
 
-      allow delete: if signedIn() && resource.data.ownerUid == request.auth.uid;
+      allow delete: if signedIn()
+        && resource != null
+        && resource.data.ownerUid == request.auth.uid;
     }
 
     match /{document=**} { allow read, write: if false; }

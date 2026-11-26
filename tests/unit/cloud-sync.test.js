@@ -168,6 +168,12 @@ function createRulesEnforcingFirebaseMock() {
                   throw permissionDenied('users uid mismatch');
                 }
                 if (op.type === 'delete') {
+                  const oldToken = existing?.shareToken ?? null;
+                  if (oldToken !== null && afterDocs.has(`shares/${oldToken}`)) {
+                    throw permissionDenied(
+                      'users delete must also delete active shares/{oldToken}',
+                    );
+                  }
                   continue;
                 }
                 const d = op.materialized;
@@ -201,6 +207,27 @@ function createRulesEnforcingFirebaseMock() {
                   !validToken(d.shareToken)
                 ) {
                   throw permissionDenied('users invalid shareToken');
+                }
+                const nextShareToken = d.shareToken ?? null;
+                if (nextShareToken !== null) {
+                  const targetShare = afterDocs.get(`shares/${nextShareToken}`);
+                  if (!targetShare || targetShare.ownerUid !== id) {
+                    throw permissionDenied(
+                      'users shareToken must point to a shares/{token} owned by uid',
+                    );
+                  }
+                }
+                if (existing !== null) {
+                  const prevShareToken = existing.shareToken ?? null;
+                  if (
+                    prevShareToken !== null &&
+                    prevShareToken !== nextShareToken &&
+                    afterDocs.has(`shares/${prevShareToken}`)
+                  ) {
+                    throw permissionDenied(
+                      'users update changing/clearing shareToken must delete shares/{oldToken}',
+                    );
+                  }
                 }
               } else if (col === 'shares') {
                 if (op.type === 'delete') {
@@ -568,6 +595,63 @@ describe('CloudSyncManager & Firestore Security Rules Invariants (cloudSync.js)'
 
     // Explicit sign-in surfaces clear setup guidance
     await expect(mgr.signInWithGoogle()).rejects.toThrow(/\.env\.local/i);
+    mgr.stop();
+  });
+
+  it('rejects orphan shares on user update/delete and dangling shareToken pointers (#12)', async () => {
+    const fbMock = createRulesEnforcingFirebaseMock();
+    const mem = createMemoryStorage();
+    const storageSvc = new StorageService({ storage: mem });
+    const mgr = new CloudSyncManager({
+      firebaseFactory: () => fbMock.service,
+      storage: mem,
+      storageSvc,
+    });
+    mgr.start();
+
+    fbMock.setPopupUser({ uid: 'user-1', email: 's@example.com' });
+    await mgr.signInWithGoogle();
+    const activeToken = await mgr.enableOrRotateShare(storageSvc.load());
+    const stateJson = JSON.stringify(storageSvc.load());
+
+    // 1. Direct update setting shareToken: null WITHOUT deleting shares/{activeToken} -> denied
+    const orphanUpdateBatch = fbMock.service.writeBatch();
+    orphanUpdateBatch.set(fbMock.service.doc('users', 'user-1'), {
+      stateJson,
+      updatedAt: fbMock.service.serverTimestamp(),
+      rev: 3,
+      shareToken: null,
+    });
+    await expect(orphanUpdateBatch.commit()).rejects.toMatchObject({
+      code: 'permission-denied',
+    });
+
+    // 2. Direct delete of users/user-1 WITHOUT deleting shares/{activeToken} -> denied
+    const orphanDeleteBatch = fbMock.service.writeBatch();
+    orphanDeleteBatch.delete(fbMock.service.doc('users', 'user-1'));
+    await expect(orphanDeleteBatch.commit()).rejects.toMatchObject({
+      code: 'permission-denied',
+    });
+
+    // 3. Direct update pointing shareToken at a non-existent share doc -> denied
+    const danglingToken = generateShareToken();
+    const danglingBatch = fbMock.service.writeBatch();
+    danglingBatch.delete(fbMock.service.doc('shares', activeToken));
+    danglingBatch.set(fbMock.service.doc('users', 'user-1'), {
+      stateJson,
+      updatedAt: fbMock.service.serverTimestamp(),
+      rev: 3,
+      shareToken: danglingToken,
+    });
+    await expect(danglingBatch.commit()).rejects.toMatchObject({
+      code: 'permission-denied',
+    });
+
+    // Clean disableShare & deleteCloudData still succeed 100%
+    await mgr.disableShare(storageSvc.load());
+    expect(fbMock.docs.has(`shares/${activeToken}`)).toBe(false);
+    await mgr.deleteCloudData();
+    expect(fbMock.docs.has('users/user-1')).toBe(false);
     mgr.stop();
   });
 });
