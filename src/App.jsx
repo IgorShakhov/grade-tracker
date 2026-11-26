@@ -29,6 +29,12 @@ import {
   exportStateAsJson,
   exportStateAsCsv,
 } from './services/exporters.js';
+import {
+  githubSyncManager,
+  extractLiveProfileParams,
+  clearLiveProfileParamsFromUrl,
+  fetchRemoteProfile,
+} from './services/githubSync.js';
 
 import HeaderLedger from './components/HeaderLedger.jsx';
 import TermTabs from './components/TermTabs.jsx';
@@ -40,6 +46,7 @@ import {
   ScaleEditorModal,
   ConfirmDeleteModal,
 } from './components/Modals.jsx';
+import { CloudSyncModal, SyncConflictModal } from './components/SyncModals.jsx';
 
 const MAX_HISTORY = 30;
 const COALESCE_WINDOW_MS = 700;
@@ -116,14 +123,25 @@ export default function App() {
     future: [],
   }));
   const state = doc.current;
+  const stateRef = useRef(state);
+  stateRef.current = state;
   const lastCoalesceRef = useRef({ key: null, time: 0 });
 
+  const [syncSnapshot, setSyncSnapshot] = useState(() =>
+    githubSyncManager.getSnapshot(),
+  );
   const [sharedState, setSharedState] = useState(null);
+  const [liveProfileMeta, setLiveProfileMeta] = useState(null);
+  const [liveRefreshing, setLiveRefreshing] = useState(false);
+
   // When non-null, What-If Simulator is active and isolates all edits in memory
   const [sandboxState, setSandboxState] = useState(null);
   const [shareModalUrl, setShareModalUrl] = useState(null);
   const [showDataModal, setShowDataModal] = useState(false);
   const [showScaleModal, setShowScaleModal] = useState(false);
+  const [showSyncModal, setShowSyncModal] = useState(false);
+  const [syncModalPrefill, setSyncModalPrefill] = useState(null);
+  const [conflictDismissed, setConflictDismissed] = useState(false);
   const [pendingDelete, setPendingDelete] = useState(null);
   const [dragIndex, setDragIndex] = useState(null);
   const [dragOverIndex, setDragOverIndex] = useState(null);
@@ -140,36 +158,112 @@ export default function App() {
     return () => clearTimeout(t);
   }, [toast]);
 
-  // Subscribe to remote cloud adapter updates if connected
+  // Subscribe to GitHubSyncManager status updates and remote state pushes
   useEffect(() => {
-    return storageService.subscribe((remoteState) => {
+    const unsubSync = githubSyncManager.subscribe((nextSnap) => {
+      setSyncSnapshot(nextSnap);
+      if (nextSnap.status !== 'conflict') {
+        setConflictDismissed(false);
+      }
+    });
+    const unsubStorage = storageService.subscribe((remoteState) => {
       setDoc((prev) => ({ ...prev, current: remoteState }));
     });
+    return () => {
+      unsubSync();
+      unsubStorage();
+    };
   }, []);
 
-  // Check URL for compressed read-only snapshot (#share=... or ?share=...)
+  // Auto-sync on mount, window focus, and network reconnect when Cloud Sync is enabled
+  useEffect(() => {
+    const snap = githubSyncManager.getSnapshot();
+    if (snap.config?.enabled && snap.config?.token) {
+      githubSyncManager.syncNow(stateRef.current).catch(() => {});
+    }
+
+    function handleOnlineOrFocus() {
+      const cur = githubSyncManager.getSnapshot();
+      if (cur.config?.enabled && cur.config?.token) {
+        githubSyncManager.syncNow(stateRef.current).catch(() => {});
+      }
+    }
+
+    window.addEventListener('online', handleOnlineOrFocus);
+    window.addEventListener('focus', handleOnlineOrFocus);
+    return () => {
+      window.removeEventListener('online', handleOnlineOrFocus);
+      window.removeEventListener('focus', handleOnlineOrFocus);
+    };
+  }, []);
+
+  // Check URL for either ?profile=<id> (Live GitHub Read-Only View) or #share=... (Compressed Snapshot)
   useEffect(() => {
     let cancelled = false;
-    async function checkSharedUrl() {
+    async function checkUrlViewMode() {
       if (typeof window === 'undefined') return;
+
+      const liveParams = extractLiveProfileParams(window.location);
+      if (liveParams && liveParams.repo) {
+        const currentCfg = githubSyncManager.getSnapshot().config;
+        const isSameEditableProfile =
+          currentCfg?.enabled &&
+          currentCfg?.token &&
+          currentCfg.profileId === liveParams.profileId &&
+          currentCfg.repo.toLowerCase() === liveParams.repo.toLowerCase();
+
+        if (!isSameEditableProfile) {
+          try {
+            const remote = await fetchRemoteProfile({
+              repo: liveParams.repo,
+              branch: liveParams.branch,
+              profileId: liveParams.profileId,
+            });
+            if (!cancelled) {
+              if (remote.exists && remote.state) {
+                setLiveProfileMeta(liveParams);
+                setSharedState(remote.state);
+              } else {
+                showToast(
+                  `Profile "${liveParams.profileId}" was not found on ${liveParams.repo}.`,
+                );
+              }
+            }
+          } catch (err) {
+            if (!cancelled) {
+              showToast(err.message || 'Could not fetch live profile from GitHub.');
+            }
+          }
+          return;
+        }
+      }
+
       const token = extractShareTokenFromUrl(window.location);
       if (!token) return;
       const decoded = await decodeShareSnapshot(token);
       if (!cancelled) {
         if (decoded) {
+          setLiveProfileMeta(null);
           setSharedState(decoded);
         } else {
-          showToast('Shared snapshot link was invalid or incomplete; loaded local tracker.');
+          showToast(
+            'Shared snapshot link was invalid or incomplete; loaded local tracker.',
+          );
         }
       }
     }
-    checkSharedUrl();
+    checkUrlViewMode();
     return () => {
       cancelled = true;
     };
   }, [showToast]);
 
   const isSharedReadOnly = Boolean(sharedState);
+  const readOnlyMode = isSharedReadOnly
+    ? liveProfileMeta
+      ? 'live-profile'
+      : 'snapshot'
+    : null;
   const simMode = sandboxState !== null;
   // In What-If Sandbox mode, allow testing edits even on a shared snapshot (in memory only)
   const readOnly = isSharedReadOnly && !simMode;
@@ -212,7 +306,7 @@ export default function App() {
   /**
    * Commits a user mutation.
    * When What-If Simulator (`simMode`) is active, mutates ONLY in-memory `sandboxState`
-   * without touching saved `localStorage` state or Undo/Redo history.
+   * without touching saved `localStorage` state, Cloud Sync, or Undo/Redo history.
    */
   const commitState = useCallback(
     (updater, { coalesceKey = null, touchTimestamp = true } = {}) => {
@@ -317,11 +411,33 @@ export default function App() {
   const allCollapsed =
     allCoursesInTerm.length > 0 && allCoursesInTerm.every((c) => Boolean(c.collapsed));
 
-  // --- Shared View Handlers ---
+  // --- Shared / Live Profile View Handlers ---
   function handleExitSharedView() {
     clearShareParamsFromCurrentUrl(window);
+    clearLiveProfileParamsFromUrl(window);
     setSandboxState(null);
+    setLiveProfileMeta(null);
     setSharedState(null);
+  }
+
+  async function handleRefreshLiveProfile() {
+    if (!liveProfileMeta) return;
+    setLiveRefreshing(true);
+    try {
+      const remote = await fetchRemoteProfile({
+        repo: liveProfileMeta.repo,
+        branch: liveProfileMeta.branch,
+        profileId: liveProfileMeta.profileId,
+      });
+      if (remote.exists && remote.state) {
+        setSharedState(remote.state);
+        showToast('Refreshed latest grades from GitHub.');
+      }
+    } catch (err) {
+      showToast(err.message || 'Could not refresh profile.');
+    } finally {
+      setLiveRefreshing(false);
+    }
   }
 
   function handleSaveSharedCopyLocally() {
@@ -334,8 +450,50 @@ export default function App() {
       future: [],
     }));
     clearShareParamsFromCurrentUrl(window);
+    clearLiveProfileParamsFromUrl(window);
+    setLiveProfileMeta(null);
     setSharedState(null);
     showToast('Saved shared courses into your local tracker.');
+  }
+
+  // --- Cloud Sync Handlers ---
+  function handleOpenSyncControl() {
+    if (syncSnapshot.status === 'conflict') {
+      setConflictDismissed(false);
+      return;
+    }
+    setSyncModalPrefill(liveProfileMeta || null);
+    setShowSyncModal(true);
+  }
+
+  async function handleConnectCloudSync(params) {
+    const result = await githubSyncManager.connect(params, stateRef.current);
+    // If we were viewing this exact profile in read-only ?profile= mode, switch to full editable mode!
+    if (liveProfileMeta && liveProfileMeta.profileId === params.profileId) {
+      setLiveProfileMeta(null);
+      setSharedState(null);
+    }
+    setShowSyncModal(false);
+    setSyncModalPrefill(null);
+    showToast(
+      result.mode === 'pulled'
+        ? `Connected & loaded profile "${params.profileId}" from GitHub.`
+        : `Connected & created profile "${params.profileId}" on GitHub.`,
+    );
+  }
+
+  function handleDisconnectCloudSync() {
+    githubSyncManager.disconnect();
+    showToast('Disconnected GitHub Cloud Sync on this device.');
+  }
+
+  async function handleCopyUrlText(urlText, label = 'Link copied to clipboard.') {
+    try {
+      await navigator.clipboard.writeText(urlText);
+      showToast(label);
+    } catch {
+      showToast('Select and copy the URL from the box.');
+    }
   }
 
   // --- Share Link Generation (always shares saved baseState, not temporary What-If) ---
@@ -346,16 +504,6 @@ export default function App() {
       setShareModalUrl(url);
     } catch {
       showToast('Could not generate share link.');
-    }
-  }
-
-  async function handleCopyShareUrl() {
-    if (!shareModalUrl) return;
-    try {
-      await navigator.clipboard.writeText(shareModalUrl);
-      showToast('Read-only share link copied to clipboard.');
-    } catch {
-      showToast('Select and copy the URL from the box.');
     }
   }
 
@@ -627,23 +775,55 @@ export default function App() {
 
   return (
     <div className="app-root">
-      {/* Shared Read-Only Banner */}
+      {/* Shared Snapshot or Live GitHub Profile Banner */}
       {isSharedReadOnly && (
         <div className="mode-banner" role="status">
           <div className="mode-banner-inner">
-            <span>
-              Viewing a <strong>Read-Only Shared Snapshot</strong> (
-              {baseState.studentName || 'Shared'}). Edits are disabled unless you
-              save a copy or turn on What-If Simulator.
-            </span>
+            {liveProfileMeta ? (
+              <span>
+                Viewing <strong>Live GitHub Profile</strong> (
+                <code>{liveProfileMeta.profileId}</code>). Read-only unless you
+                connect a token or turn on What-If Simulator.
+              </span>
+            ) : (
+              <span>
+                Viewing a <strong>Read-Only Shared Snapshot</strong> (
+                {baseState.studentName || 'Shared'}). Edits are disabled unless
+                you save a copy or turn on What-If Simulator.
+              </span>
+            )}
             <div className="mode-banner-actions">
+              {liveProfileMeta && (
+                <>
+                  <button
+                    id="refresh-live-profile-btn"
+                    type="button"
+                    className="btn btn-ghost-light"
+                    disabled={liveRefreshing}
+                    onClick={handleRefreshLiveProfile}
+                  >
+                    {liveRefreshing ? 'Refreshing…' : '↻ Refresh'}
+                  </button>
+                  <button
+                    id="connect-live-profile-btn"
+                    type="button"
+                    className="btn btn-ghost-light"
+                    onClick={() => {
+                      setSyncModalPrefill(liveProfileMeta);
+                      setShowSyncModal(true);
+                    }}
+                  >
+                    Connect Token to Edit
+                  </button>
+                </>
+              )}
               <button
                 id="save-shared-copy-btn"
                 type="button"
                 className="btn btn-ghost-light"
                 onClick={handleSaveSharedCopyLocally}
               >
-                Save Copy to My Browser
+                Save Copy Locally
               </button>
               <button
                 id="exit-shared-view-btn"
@@ -651,7 +831,7 @@ export default function App() {
                 className="btn btn-ghost-light"
                 onClick={handleExitSharedView}
               >
-                Open My Own Tracker
+                Open My Local Tracker
               </button>
             </div>
           </div>
@@ -695,6 +875,8 @@ export default function App() {
         studentName={activeState.studentName}
         lastUpdated={activeState.lastUpdated}
         readOnly={readOnly}
+        readOnlyMode={readOnlyMode}
+        syncStatus={syncSnapshot.status}
         simMode={simMode}
         simCount={simCount}
         stats={stats}
@@ -711,6 +893,7 @@ export default function App() {
           )
         }
         onToggleSimMode={handleToggleSimMode}
+        onOpenSync={handleOpenSyncControl}
         onOpenShare={handleOpenShareModal}
         onOpenData={() => setShowDataModal(true)}
       />
@@ -865,7 +1048,48 @@ export default function App() {
         <ShareModal
           shareUrl={shareModalUrl}
           onClose={() => setShareModalUrl(null)}
-          onCopy={handleCopyShareUrl}
+          onCopy={() =>
+            handleCopyUrlText(
+              shareModalUrl,
+              'Read-only snapshot link copied to clipboard.',
+            )
+          }
+        />
+      )}
+
+      {showSyncModal && (
+        <CloudSyncModal
+          syncSnapshot={syncSnapshot}
+          initialPrefill={syncModalPrefill}
+          onConnect={handleConnectCloudSync}
+          onDisconnect={handleDisconnectCloudSync}
+          onSyncNow={async () => {
+            await githubSyncManager.syncNow(stateRef.current);
+            showToast('Synced with GitHub.');
+          }}
+          onCopyLiveUrl={(urlText) =>
+            handleCopyUrlText(urlText, 'Live GitHub profile link copied.')
+          }
+          onClose={() => {
+            setShowSyncModal(false);
+            setSyncModalPrefill(null);
+          }}
+        />
+      )}
+
+      {syncSnapshot.status === 'conflict' && !conflictDismissed && (
+        <SyncConflictModal
+          localState={state}
+          remoteState={syncSnapshot.conflictRemoteState}
+          onKeepLocal={async () => {
+            await githubSyncManager.resolveConflict('keep-local', stateRef.current);
+            showToast('Kept local changes and updated GitHub.');
+          }}
+          onUseRemote={async () => {
+            await githubSyncManager.resolveConflict('use-remote', stateRef.current);
+            showToast('Loaded latest version from GitHub.');
+          }}
+          onClose={() => setConflictDismissed(true)}
         />
       )}
 
