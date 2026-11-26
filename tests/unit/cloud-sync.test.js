@@ -844,4 +844,61 @@ describe('CloudSyncManager & Firestore Security Rules Invariants (cloudSync.js)'
     expect(storageSvc2.load().studentName).toBe('Cloud Saved');
     mgr2.stop();
   });
+
+  it('wipes background tab in-memory state and metadata when another tab signs out (#11)', async () => {
+    const fbMock = createRulesEnforcingFirebaseMock();
+    const sharedMem = createMemoryStorage();
+    const tab1Storage = new StorageService({ storage: sharedMem });
+    const tab2Storage = new StorageService({ storage: sharedMem });
+
+    const tab1 = new CloudSyncManager({
+      firebaseFactory: () => fbMock.service,
+      storage: sharedMem,
+      storageSvc: tab1Storage,
+      debounceMs: 10,
+    });
+    const tab2 = new CloudSyncManager({
+      firebaseFactory: () => fbMock.service,
+      storage: sharedMem,
+      storageSvc: tab2Storage,
+      debounceMs: 10,
+    });
+    tab1.start();
+    tab2.start();
+
+    fbMock.setPopupUser({ uid: 'user-A', email: 'a@example.com' });
+    await tab1.signInWithGoogle();
+    // Wait for tab2's auth listener reconciliation
+    if (tab2.reconcilePromise) await tab2.reconcilePromise;
+
+    const aCourses = tab1Storage.load();
+    aCourses.studentName = 'User A Secret';
+    tab1Storage.save(aCourses);
+    await tab1.flushPendingSave();
+
+    // Simulate Tab 2 having User A's state & metadata in memory
+    tab2.handleExternalStorageEvent({ key: STORAGE_KEY, newValue: sharedMem.getItem(STORAGE_KEY) });
+    tab2.handleExternalStorageEvent({ key: SYNC_META_KEY, newValue: sharedMem.getItem(SYNC_META_KEY) });
+    expect(tab2.latestLocalState.studentName).toBe('User A Secret');
+    expect(tab2.getSnapshot().rev).toBe(2);
+
+    // Tab 1 signs out -> fires signOutAuth() -> onAuthStateChanged(null) in Tab 2!
+    await tab1.signOutUser();
+    await Promise.resolve();
+
+    // Tab 2 must have wiped its in-memory meta & latestLocalState too!
+    expect(tab2.getSnapshot().user).toBeNull();
+    expect(tab2.meta.lastSyncedUid).toBeNull();
+    expect(tab2.latestLocalState.studentName).toBe('My');
+
+    // Even if someone edits in Tab 2 afterward, lastSyncedUid stays null (no User A bleed!)
+    const anonEdit = tab2Storage.load();
+    anonEdit.studentName = 'Anonymous Local';
+    tab2Storage.save(anonEdit);
+    await Promise.resolve();
+    expect(JSON.parse(sharedMem.getItem(SYNC_META_KEY)).lastSyncedUid).toBeNull();
+
+    tab1.stop();
+    tab2.stop();
+  });
 });

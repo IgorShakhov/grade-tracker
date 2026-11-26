@@ -217,4 +217,31 @@ describe('Grade Tracker React Application (M1 + M1.1 + Firebase Cloud Sync)', ()
       saveSpy.mockRestore();
     }
   });
+
+  it('clears stale Undo/Redo history and What-If sandbox when a remote cloud pull arrives (#11)', async () => {
+    const { act } = await import('@testing-library/react');
+    render(<App />);
+
+    // Create local Undo history + enter What-If Simulator
+    fireEvent.click(screen.getByRole('button', { name: /\+ Blank Course/i }));
+    const undoBtn = screen.getByRole('button', { name: /↶ Undo/i });
+    expect(undoBtn).not.toBeDisabled();
+
+    fireEvent.click(screen.getByRole('button', { name: /What-If Simulator/i }));
+    expect(screen.getByText(/What-If Exam Simulator ON/i)).toBeInTheDocument();
+
+    // Simulate remote cloud pull arriving via StorageService
+    const remote = storageService.load();
+    remote.studentName = 'Pulled From Laptop';
+    act(() => {
+      storageService.saveLocalOnly(remote);
+      storageService.notify(remote);
+    });
+
+    expect(screen.getByLabelText('Tracker owner or label')).toHaveValue(
+      'Pulled From Laptop',
+    );
+    expect(screen.queryByText(/What-If Exam Simulator ON/i)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /↶ Undo/i })).toBeDisabled();
+  });
 });
