@@ -126,6 +126,8 @@ export default function App() {
     cloudSyncManager.getSnapshot(),
   );
   const [sharedState, setSharedState] = useState(null);
+  const sharedStateRef = useRef(sharedState);
+  sharedStateRef.current = sharedState;
   const [liveShareTokenView, setLiveShareTokenView] = useState(null);
   const [liveRefreshing, setLiveRefreshing] = useState(false);
 
@@ -152,10 +154,19 @@ export default function App() {
     return () => clearTimeout(t);
   }, [toast]);
 
-  // Start CloudSyncManager and subscribe to sync + remote storage updates
+  // Start CloudSyncManager and subscribe to sync + remote/cross-tab storage updates (#11)
   useEffect(() => {
     const unsubStorage = storageService.subscribe((remoteState) => {
-      setDoc((prev) => ({ ...prev, current: remoteState }));
+      lastCoalesceRef.current = { key: null, time: 0 };
+      if (!sharedStateRef.current) {
+        setSandboxState(null);
+      }
+      setDoc((prev) => ({
+        current: remoteState,
+        past: [],
+        future: [],
+        localSaveSeq: prev.localSaveSeq || 0,
+      }));
     });
     const unsubSync = cloudSyncManager.subscribe((nextSnap) => {
       setSyncSnapshot(nextSnap);

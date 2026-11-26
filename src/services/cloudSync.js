@@ -341,6 +341,11 @@ export class CloudSyncManager {
     this.latestLocalState = null;
     this.inFlightPromise = null;
     this.queuedFlushAfterFlight = false;
+    this.usesBrowserLocalStorage =
+      !options.storage ||
+      (typeof globalThis !== 'undefined' &&
+        options.storage === globalThis.localStorage);
+    this.boundStorageListener = null;
     this.authUnsubscribe = null;
     this.storageAdapterDetach = null;
     this.initialized = false;
@@ -453,6 +458,15 @@ export class CloudSyncManager {
       });
     }
 
+    if (
+      this.usesBrowserLocalStorage &&
+      typeof window !== 'undefined' &&
+      !this.boundStorageListener
+    ) {
+      this.boundStorageListener = (e) => this.handleExternalStorageEvent(e);
+      window.addEventListener('storage', this.boundStorageListener);
+    }
+
     if (!this.initialized) {
       this.initialized = true;
       try {
@@ -489,6 +503,10 @@ export class CloudSyncManager {
 
   stop() {
     this.cancelDebounce();
+    if (this.boundStorageListener && typeof window !== 'undefined') {
+      window.removeEventListener('storage', this.boundStorageListener);
+      this.boundStorageListener = null;
+    }
     if (typeof this.authUnsubscribe === 'function') {
       try {
         this.authUnsubscribe();
@@ -502,6 +520,44 @@ export class CloudSyncManager {
       this.storageAdapterDetach = null;
     }
     this.initialized = false;
+  }
+
+  /**
+   * Synchronizes in-memory state and metadata across browser tabs when another tab
+   * wipes storage on Sign Out or saves updated courses/revisions (#11).
+   */
+  handleExternalStorageEvent(event) {
+    const trackerKey = this.storageSvc?.storageKey || STORAGE_KEY;
+
+    if (!event || event.key === null || (event.key === SYNC_META_KEY && event.newValue === null)) {
+      this.cancelDebounce();
+      this.queuedFlushAfterFlight = false;
+      this.meta = this.loadMeta();
+      this.conflict = null;
+      const reloaded = this.storageSvc.load();
+      this.latestLocalState = reloaded;
+      this.storageSvc.notify(reloaded);
+      this.emit();
+      return;
+    }
+
+    if (event.key === SYNC_META_KEY) {
+      this.meta = this.loadMeta();
+      if (!this.meta.dirty && this.status === 'pending') {
+        this.cancelDebounce();
+        if (this.currentUser) {
+          this.status = 'synced';
+        }
+      }
+      this.emit();
+      return;
+    }
+
+    if (event.key === trackerKey) {
+      const reloaded = this.storageSvc.load();
+      this.latestLocalState = reloaded;
+      this.storageSvc.notify(reloaded);
+    }
   }
 
   cancelDebounce() {
@@ -589,14 +645,20 @@ export class CloudSyncManager {
     const sanitized = sanitizeUserForMemory(fbUser);
 
     if (!sanitized) {
+      const wasSignedIn = Boolean(this.currentUser);
       this.authEpoch += 1;
       this.reconcilingUid = null;
       this.reconcilePromise = null;
+      this.queuedFlushAfterFlight = false;
       this.cancelDebounce();
       this.currentUser = null;
       this.conflict = null;
       this.error = null;
       this.status = 'disconnected';
+      if (wasSignedIn) {
+        this.clearMeta();
+        this.resetLocalTrackerClean();
+      }
       this.emit();
       return;
     }
