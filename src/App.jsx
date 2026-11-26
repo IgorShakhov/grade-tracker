@@ -460,8 +460,11 @@ export default function App() {
     }
   }
 
-  async function handleSignOutGoogle() {
-    await cloudSyncManager.signOutUser();
+  async function handleSignOutGoogle(options = {}) {
+    const result = await cloudSyncManager.signOutUser(options);
+    if (result?.requiresDiscardConfirm) {
+      return result;
+    }
     lastCoalesceRef.current = { key: null, time: 0 };
     setSandboxState(null);
     setDoc({
@@ -471,6 +474,7 @@ export default function App() {
     });
     setShowSyncModal(false);
     showToast('Signed out and cleared local cached grades.');
+    return result;
   }
 
   async function handleDeleteCloudData() {

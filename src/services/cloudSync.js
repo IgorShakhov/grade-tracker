@@ -770,10 +770,40 @@ export class CloudSyncManager {
   }
 
   /**
-   * Signs out of Firebase Auth AND wipes local grade storage + sync metadata (`E2`)
-   * so grades are never left behind on a shared computer.
+   * Signs out of Firebase Auth AND wipes local grade storage + sync metadata (`E2`).
+   * Unless `forceDiscard` is true, flushes any pending debounced edits to Firestore first;
+   * if unsynced edits still remain (offline, conflict, or push failure), aborts sign-out
+   * and returns `{ signedOut: false, requiresDiscardConfirm: true }` (#9).
    */
-  async signOutUser() {
+  async signOutUser({ forceDiscard = false } = {}) {
+    await Promise.resolve();
+    if (!forceDiscard && this.currentUser) {
+      if (this.reconcilePromise) {
+        await this.reconcilePromise.catch(() => {});
+      }
+      if (this.inFlightPromise) {
+        await this.inFlightPromise.catch(() => {});
+      }
+
+      if (this.currentUser && (this.meta.dirty || this.debounceTimer !== null)) {
+        this.cancelDebounce();
+        if (!isBrowserOffline() && this.status !== 'conflict') {
+          try {
+            await this.flushPendingSave();
+          } catch {
+            // Leave dirty:true so confirmation prompt triggers below
+          }
+          if (this.inFlightPromise) {
+            await this.inFlightPromise.catch(() => {});
+          }
+        }
+      }
+
+      if (this.currentUser && (this.meta.dirty || this.status === 'conflict')) {
+        return { signedOut: false, requiresDiscardConfirm: true };
+      }
+    }
+
     this.authEpoch += 1;
     this.reconcilingUid = null;
     this.reconcilePromise = null;
@@ -797,6 +827,7 @@ export class CloudSyncManager {
       this.resetLocalTrackerClean();
       this.emit();
     }
+    return { signedOut: true, requiresDiscardConfirm: false };
   }
 
   async flushPendingSave() {
@@ -1391,7 +1422,7 @@ export class CloudSyncManager {
       await batch.commit();
     }
 
-    await this.signOutUser();
+    await this.signOutUser({ forceDiscard: true });
   }
 }
 
