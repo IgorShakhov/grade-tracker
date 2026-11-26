@@ -114,11 +114,13 @@ export default function App() {
     current: storageService.load(),
     past: [],
     future: [],
+    localSaveSeq: 0,
   }));
   const state = doc.current;
   const stateRef = useRef(state);
   stateRef.current = state;
   const lastCoalesceRef = useRef({ key: null, time: 0 });
+  const lastPersistedSeqRef = useRef(0);
 
   const [syncSnapshot, setSyncSnapshot] = useState(() =>
     cloudSyncManager.getSnapshot(),
@@ -271,6 +273,17 @@ export default function App() {
     setSandboxState(structuredClone(baseState));
   }, [baseState]);
 
+  // Persist committed local user edits once outside pure `setDoc` updaters (#14)
+  useEffect(() => {
+    if (doc.localSaveSeq > lastPersistedSeqRef.current) {
+      lastPersistedSeqRef.current = doc.localSaveSeq;
+      storageService.save(doc.current, {
+        touchTimestamp: false,
+        notifyListeners: false,
+      });
+    }
+  }, [doc.localSaveSeq, doc.current]);
+
   const updateCurrentWithoutHistory = useCallback(
     (updater, { touchTimestamp = false } = {}) => {
       if (simMode) {
@@ -280,11 +293,20 @@ export default function App() {
         });
         return;
       }
+      const nowIso = new Date().toISOString();
       setDoc((prev) => {
         const nextCurrent =
           typeof updater === 'function' ? updater(prev.current) : updater;
-        const saved = storageService.save(nextCurrent, { touchTimestamp });
-        return { ...prev, current: saved };
+        if (nextCurrent === prev.current) return prev;
+        const prepared = storageService.prepareForSave(nextCurrent, {
+          touchTimestamp,
+          nowIso,
+        });
+        return {
+          ...prev,
+          current: prepared,
+          localSaveSeq: (prev.localSaveSeq || 0) + 1,
+        };
       });
     },
     [simMode],
@@ -306,6 +328,7 @@ export default function App() {
       }
 
       const now = Date.now();
+      const nowIso = new Date(now).toISOString();
       const shouldCoalesce =
         coalesceKey !== null &&
         lastCoalesceRef.current.key === coalesceKey &&
@@ -316,13 +339,17 @@ export default function App() {
         const computed =
           typeof updater === 'function' ? updater(prev.current) : updater;
         if (computed === prev.current) return prev;
-        const saved = storageService.save(computed, { touchTimestamp });
+        const prepared = storageService.prepareForSave(computed, {
+          touchTimestamp,
+          nowIso,
+        });
         return {
-          current: saved,
+          current: prepared,
           past: shouldCoalesce
             ? prev.past
             : [...prev.past.slice(-(MAX_HISTORY - 1)), prev.current],
           future: [],
+          localSaveSeq: (prev.localSaveSeq || 0) + 1,
         };
       });
     },
@@ -332,14 +359,19 @@ export default function App() {
   const handleUndo = useCallback(() => {
     if (isSharedReadOnly || simMode) return;
     lastCoalesceRef.current = { key: null, time: 0 };
+    const nowIso = new Date().toISOString();
     setDoc((prev) => {
       if (prev.past.length === 0) return prev;
       const previous = prev.past[prev.past.length - 1];
-      const restored = storageService.save(previous, { touchTimestamp: true });
+      const restored = storageService.prepareForSave(previous, {
+        touchTimestamp: true,
+        nowIso,
+      });
       return {
         current: restored,
         past: prev.past.slice(0, -1),
         future: [prev.current, ...prev.future.slice(0, MAX_HISTORY - 1)],
+        localSaveSeq: (prev.localSaveSeq || 0) + 1,
       };
     });
     showToast('Undid last change.');
@@ -348,14 +380,19 @@ export default function App() {
   const handleRedo = useCallback(() => {
     if (isSharedReadOnly || simMode) return;
     lastCoalesceRef.current = { key: null, time: 0 };
+    const nowIso = new Date().toISOString();
     setDoc((prev) => {
       if (prev.future.length === 0) return prev;
       const [nextItem, ...remainingFuture] = prev.future;
-      const restored = storageService.save(nextItem, { touchTimestamp: true });
+      const restored = storageService.prepareForSave(nextItem, {
+        touchTimestamp: true,
+        nowIso,
+      });
       return {
         current: restored,
         past: [...prev.past.slice(-(MAX_HISTORY - 1)), prev.current],
         future: remainingFuture,
+        localSaveSeq: (prev.localSaveSeq || 0) + 1,
       };
     });
     showToast('Redid change.');
@@ -428,12 +465,19 @@ export default function App() {
   function handleSaveSharedCopyLocally() {
     if (!sharedState) return;
     setSandboxState(null);
-    const saved = storageService.save(sharedState, { touchTimestamp: true });
-    setDoc((prev) => ({
-      current: saved,
-      past: [...prev.past.slice(-(MAX_HISTORY - 1)), prev.current],
-      future: [],
-    }));
+    const nowIso = new Date().toISOString();
+    setDoc((prev) => {
+      const prepared = storageService.prepareForSave(sharedState, {
+        touchTimestamp: true,
+        nowIso,
+      });
+      return {
+        current: prepared,
+        past: [...prev.past.slice(-(MAX_HISTORY - 1)), prev.current],
+        future: [],
+        localSaveSeq: (prev.localSaveSeq || 0) + 1,
+      };
+    });
     clearShareParamsFromCurrentUrl(window);
     clearLiveViewFromUrl(window);
     setLiveShareTokenView(null);
@@ -467,11 +511,12 @@ export default function App() {
     }
     lastCoalesceRef.current = { key: null, time: 0 };
     setSandboxState(null);
-    setDoc({
+    setDoc((prev) => ({
       current: storageService.load(),
       past: [],
       future: [],
-    });
+      localSaveSeq: prev.localSaveSeq || 0,
+    }));
     setShowSyncModal(false);
     showToast('Signed out and cleared local cached grades.');
     return result;
@@ -481,11 +526,12 @@ export default function App() {
     await cloudSyncManager.deleteCloudData();
     lastCoalesceRef.current = { key: null, time: 0 };
     setSandboxState(null);
-    setDoc({
+    setDoc((prev) => ({
       current: storageService.load(),
       past: [],
       future: [],
-    });
+      localSaveSeq: prev.localSaveSeq || 0,
+    }));
     setShowSyncModal(false);
     showToast('Deleted cloud data and cleared local browser cache.');
   }
@@ -1100,11 +1146,12 @@ export default function App() {
                 stateRef.current,
               );
               setSandboxState(null);
-              setDoc({
+              setDoc((prev) => ({
                 current: storageService.load(),
                 past: [],
                 future: [],
-              });
+                localSaveSeq: prev.localSaveSeq || 0,
+              }));
               showToast(
                 hadRemote
                   ? 'Loaded courses from Google Cloud.'

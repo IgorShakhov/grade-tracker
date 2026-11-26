@@ -1,5 +1,7 @@
+import { StrictMode } from 'react';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { render, screen, within, fireEvent } from '@testing-library/react';
+import { storageService } from '../../src/services/storage.js';
 
 // Mock Firebase service layer so React UI tests never open network sockets
 vi.mock('../../src/services/firebase.js', () => ({
@@ -186,5 +188,33 @@ describe('Grade Tracker React Application (M1 + M1.1 + Firebase Cloud Sync)', ()
     const shareDialog = await screen.findByRole('dialog', { name: /Share Read-Only View/i });
     expect(within(shareDialog).getByText(/Live Auto-Updating Link/i)).toBeInTheDocument();
     expect(within(shareDialog).getByText(/One-Time Point-in-Time Snapshot/i)).toBeInTheDocument();
+  });
+
+  it('keeps setDoc updaters pure under React 19 <StrictMode> and persists each edit/undo/redo once (#14)', () => {
+    const saveSpy = vi.spyOn(storageService, 'save');
+    try {
+      render(
+        <StrictMode>
+          <App />
+        </StrictMode>,
+      );
+      expect(saveSpy).toHaveBeenCalledTimes(0);
+
+      // 1. Add a blank course -> must save once (not twice in StrictMode!)
+      fireEvent.click(screen.getByRole('button', { name: /\+ Blank Course/i }));
+      expect(saveSpy).toHaveBeenCalledTimes(1);
+
+      // 2. Collapse All (updateCurrentWithoutHistory) -> saves once
+      fireEvent.click(screen.getByRole('button', { name: /Collapse All Courses/i }));
+      expect(saveSpy).toHaveBeenCalledTimes(2);
+
+      // 3. Undo & Redo -> each saves once
+      fireEvent.click(screen.getByRole('button', { name: /↶ Undo/i }));
+      expect(saveSpy).toHaveBeenCalledTimes(3);
+      fireEvent.click(screen.getByRole('button', { name: /↷ Redo/i }));
+      expect(saveSpy).toHaveBeenCalledTimes(4);
+    } finally {
+      saveSpy.mockRestore();
+    }
   });
 });
