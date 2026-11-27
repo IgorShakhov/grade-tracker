@@ -2,7 +2,6 @@ import { useState, useEffect, useMemo } from 'react';
 import { UNIT_OPTIONS } from '../domain/constants.js';
 import {
   calculateCourseStats,
-  calculateTargetRequirement,
   buildTargetOptions,
   formatPercent,
   formatGpa,
@@ -173,7 +172,6 @@ export default function CourseCard({
     typeof course.targetPct === 'number' && Number.isFinite(course.targetPct)
       ? course.targetPct
       : 85;
-  const targetInfo = calculateTargetRequirement(course, targetPct, null);
   const targetOptions = useMemo(
     () => buildTargetOptions(gradeScale, targetPct),
     [gradeScale, targetPct],
@@ -606,27 +604,27 @@ export default function CourseCard({
                     ))}
                   </select>
 
-                  {targetInfo && targetInfo.status === 'achievable' && (
+                  {stats.targetStatus === 'achievable' && (
                     <span className="target-result">
                       Need{' '}
                       <strong>
-                        {formatPercent(targetInfo.requiredOnRemaining, 1)}
+                        {formatPercent(stats.requiredOnRemaining, 1)}
                       </strong>{' '}
                       on remaining {Math.round(stats.remainingWeight)}%
                     </span>
                   )}
 
-                  {targetInfo && targetInfo.status === 'secured' && (
+                  {stats.targetStatus === 'secured' && (
                     <span className="target-result secured">
                       <strong>Target secured</strong> (even at 0% remaining)
                     </span>
                   )}
 
-                  {targetInfo && targetInfo.status === 'unreachable' && (
+                  {stats.targetStatus === 'unreachable' && (
                     <span className="target-result unreachable">
                       Needs{' '}
                       <strong>
-                        {formatPercent(targetInfo.requiredOnRemaining, 1)}
+                        {formatPercent(stats.requiredOnRemaining, 1)}
                       </strong>{' '}
                       (max {formatPercent(stats.maxPossible, 1)})
                     </span>

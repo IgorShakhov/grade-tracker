@@ -8,7 +8,49 @@ import {
   SchemaTooNewError,
   isSchemaTooNewError,
 } from './storage.js';
-import { getFirebaseServices } from './firebase.js';
+
+let firebaseModPromise = null;
+let loadedFirebaseMod = null;
+
+/**
+ * Dynamically imports `./firebase.js` on demand (#48) so local-only users and
+ * unconfigured builds never preload or download the ~189 KB Firebase SDK chunk.
+ * Caches the resolved module synchronously so `signInWithPopup` runs without an
+ * extra microtask tick once preloaded on modal open.
+ */
+export function preloadFirebaseModule() {
+  if (loadedFirebaseMod) {
+    return Promise.resolve(loadedFirebaseMod);
+  }
+  if (!firebaseModPromise) {
+    firebaseModPromise = import('./firebase.js')
+      .then((mod) => {
+        loadedFirebaseMod = mod;
+        return mod;
+      })
+      .catch((err) => {
+        firebaseModPromise = null;
+        throw err;
+      });
+  }
+  return firebaseModPromise;
+}
+
+export function isFirebaseModulePreloaded() {
+  return Boolean(loadedFirebaseMod || firebaseModPromise);
+}
+
+export function resetFirebasePreloadForTests() {
+  firebaseModPromise = null;
+  loadedFirebaseMod = null;
+}
+
+function loadFirebaseServices() {
+  if (loadedFirebaseMod) {
+    return loadedFirebaseMod.getFirebaseServices();
+  }
+  return preloadFirebaseModule().then((mod) => mod.getFirebaseServices());
+}
 
 export const SYNC_META_KEY = 'grade_tracker_sync_meta_v1';
 export const UNSYNCED_BACKUP_KEY = 'grade_tracker_v1_unsynced_backup';
@@ -298,11 +340,14 @@ export function areTrackerStatesEquivalent(stateA, stateB) {
  * Fetches and strictly validates a read-only shared view (`shares/{token}`).
  * Works without signing in when the caller knows the exact 192-bit token.
  */
-export async function fetchSharedView(shareToken, firebaseFactory = getFirebaseServices) {
+export async function fetchSharedView(
+  shareToken,
+  firebaseFactory = loadFirebaseServices,
+) {
   if (!isValidShareToken(shareToken)) {
     throw new Error('Invalid share link token.');
   }
-  const fb = firebaseFactory();
+  const fb = await firebaseFactory();
   const snap = await fb.getDoc(fb.doc('shares', shareToken.trim()));
   if (!snap.exists()) {
     return { exists: false, state: null };
@@ -337,7 +382,8 @@ export async function fetchSharedView(shareToken, firebaseFactory = getFirebaseS
  */
 export class CloudSyncManager {
   constructor(options = {}) {
-    this.firebaseFactory = options.firebaseFactory || getFirebaseServices;
+    this.hasCustomFirebaseFactory = typeof options.firebaseFactory === 'function';
+    this.firebaseFactory = options.firebaseFactory || loadFirebaseServices;
     this.storage = resolveLocalMetaStorage(options.storage);
     this.storageSvc = options.storageSvc || storageService;
     this.debounceMs =
@@ -363,6 +409,8 @@ export class CloudSyncManager {
         options.storage === globalThis.localStorage);
     this.boundStorageListener = null;
     this.authUnsubscribe = null;
+    this.authAttachPromise = null;
+    this.lifecycleEpoch = 0;
     this.storageAdapterDetach = null;
     this.initialized = false;
     this.authEpoch = 0;
@@ -376,6 +424,10 @@ export class CloudSyncManager {
     } catch {
       // Ignore storage errors
     }
+  }
+
+  async getFirebase() {
+    return await this.firebaseFactory();
   }
 
   isSchemaBlocked() {
@@ -527,8 +579,101 @@ export class CloudSyncManager {
     }
   }
 
+  attachAuthObserver(fb) {
+    if (this.authUnsubscribe) return fb;
+    this.authUnsubscribe = fb.onAuthStateChanged(
+      (fbUser) => {
+        this.handleAuthStateChanged(fbUser).catch((err) => {
+          if (!this.currentUser || this.status !== 'syncing') return;
+          const offline = isBrowserOffline() || err?.code === 'unavailable';
+          this.status = offline ? 'offline' : 'error';
+          this.error = offline ? null : formatFriendlyError(err);
+          this.emit();
+        });
+      },
+      (err) => {
+        this.status = 'error';
+        this.error = formatFriendlyError(err);
+        this.emit();
+      },
+    );
+    return fb;
+  }
+
+  handleFirebaseInitError(err) {
+    if (err?.code === 'firebase/not-configured') {
+      this.status = 'disconnected';
+      this.error = null;
+    } else {
+      this.status = 'error';
+      this.error = formatFriendlyError(err);
+    }
+    this.emit();
+  }
+
+  ensureAuthListenerAttached({ throwOnError = false } = {}) {
+    if (this.authAttachPromise) {
+      return throwOnError
+        ? this.authAttachPromise
+        : this.authAttachPromise.catch(() => null);
+    }
+
+    const attachEpoch = this.lifecycleEpoch;
+    let maybeFb;
+    try {
+      maybeFb = this.firebaseFactory();
+    } catch (err) {
+      this.handleFirebaseInitError(err);
+      return throwOnError ? Promise.reject(err) : Promise.resolve(null);
+    }
+
+    if (maybeFb && typeof maybeFb.then === 'function') {
+      const p = maybeFb
+        .then((fb) => {
+          if (this.authAttachPromise === p) {
+            this.authAttachPromise = null;
+          }
+          if (!this.initialized || this.lifecycleEpoch !== attachEpoch) {
+            return fb;
+          }
+          return this.attachAuthObserver(fb);
+        })
+        .catch((err) => {
+          if (this.authAttachPromise === p) {
+            this.authAttachPromise = null;
+          }
+          if (this.initialized && this.lifecycleEpoch === attachEpoch) {
+            this.handleFirebaseInitError(err);
+          }
+          throw err;
+        });
+      this.authAttachPromise = p;
+      return throwOnError ? p : p.catch(() => null);
+    }
+
+    try {
+      if (this.initialized) {
+        this.attachAuthObserver(maybeFb);
+      }
+      return maybeFb;
+    } catch (err) {
+      this.handleFirebaseInitError(err);
+      return throwOnError ? Promise.reject(err) : Promise.resolve(null);
+    }
+  }
+
   /**
-   * Connects CloudSyncManager to `StorageService` and starts listening to Firebase Auth state.
+   * Pre-warms `./firebase.js` and `getAuth(app)` when the user opens `CloudSyncModal`
+   * so Safari/iOS/mobile `_popupRedirectResolver` initializes its auth iframe before
+   * the user taps "Sign in with Google" (#48, QA M-01).
+   */
+  prepareSignIn() {
+    return this.ensureAuthListenerAttached({ throwOnError: false });
+  }
+
+  /**
+   * Connects CloudSyncManager to `StorageService` and starts listening to Firebase Auth state
+   * when a returning cloud session hint exists (`lastSyncedUid` or `unsyncedBackup`) (#48).
    * Safe to call multiple times; returns a cleanup function.
    */
   start() {
@@ -549,33 +694,14 @@ export class CloudSyncManager {
 
     if (!this.initialized) {
       this.initialized = true;
-      try {
-        const fb = this.firebaseFactory();
-        this.authUnsubscribe = fb.onAuthStateChanged(
-          (fbUser) => {
-            this.handleAuthStateChanged(fbUser).catch((err) => {
-              if (!this.currentUser || this.status !== 'syncing') return;
-              const offline = isBrowserOffline() || err?.code === 'unavailable';
-              this.status = offline ? 'offline' : 'error';
-              this.error = offline ? null : formatFriendlyError(err);
-              this.emit();
-            });
-          },
-          (err) => {
-            this.status = 'error';
-            this.error = formatFriendlyError(err);
-            this.emit();
-          },
-        );
-      } catch (err) {
-        if (err?.code === 'firebase/not-configured') {
-          this.status = 'disconnected';
-          this.error = null;
-        } else {
-          this.status = 'error';
-          this.error = formatFriendlyError(err);
-        }
-        this.emit();
+      this.lifecycleEpoch += 1;
+      this.meta = this.loadMeta();
+      const shouldEagerlyRestoreSession =
+        this.hasCustomFirebaseFactory ||
+        Boolean(this.meta.lastSyncedUid || this.getUnsyncedBackup());
+
+      if (shouldEagerlyRestoreSession) {
+        this.ensureAuthListenerAttached({ throwOnError: false });
       }
     }
 
@@ -583,6 +709,8 @@ export class CloudSyncManager {
   }
 
   stop() {
+    this.lifecycleEpoch += 1;
+    this.authAttachPromise = null;
     this.cancelDebounce();
     if (this.boundStorageListener && typeof window !== 'undefined') {
       window.removeEventListener('storage', this.boundStorageListener);
@@ -625,6 +753,9 @@ export class CloudSyncManager {
 
     if (event.key === SYNC_META_KEY) {
       this.meta = this.loadMeta();
+      if (this.initialized && this.meta.lastSyncedUid && !this.authUnsubscribe) {
+        this.ensureAuthListenerAttached({ throwOnError: false });
+      }
       if (!this.meta.dirty) {
         if (this.status === 'pending') {
           this.cancelDebounce();
@@ -878,7 +1009,7 @@ export class CloudSyncManager {
     try {
       const preFetchHadSyncedRev =
         this.meta.lastSyncedUid === uid && (this.meta.lastSyncedRev || 0) > 0;
-      const fb = this.firebaseFactory();
+      const fb = await this.getFirebase();
       const userRef = fb.doc('users', uid);
       let snap = await fb.getDoc(userRef);
 
@@ -1101,7 +1232,9 @@ export class CloudSyncManager {
     this.error = null;
     this.emit();
     try {
-      const fb = this.firebaseFactory();
+      const maybeFb = this.ensureAuthListenerAttached({ throwOnError: true });
+      const fb =
+        maybeFb && typeof maybeFb.then === 'function' ? await maybeFb : maybeFb;
       const cred = await fb.signInWithGooglePopup();
       if (cred?.user) {
         await this.handleAuthStateChanged(cred.user);
@@ -1205,7 +1338,7 @@ export class CloudSyncManager {
     this.resetLocalTrackerClean();
 
     this.explicitSignOutInProgress = true;
-    const fb = this.firebaseFactory();
+    const fb = await this.getFirebase();
     try {
       await fb.signOutAuth();
     } finally {
@@ -1282,7 +1415,7 @@ export class CloudSyncManager {
           );
         }
 
-        const fb = this.firebaseFactory();
+        const fb = await this.getFirebase();
         const nextRev = (this.meta.lastSyncedRev || 0) + 1;
         const activeShareToken = isValidShareToken(this.meta.shareToken)
           ? this.meta.shareToken.trim()
@@ -1336,7 +1469,7 @@ export class CloudSyncManager {
           return;
         }
         if (err?.code === 'permission-denied') {
-          const fb = this.firebaseFactory();
+          const fb = await this.getFirebase();
           const snap = await fb.getDoc(fb.doc('users', uid));
           if (!this.isSessionCurrent(uid, startEpoch)) return;
           if (snap.exists()) {
@@ -1488,7 +1621,7 @@ export class CloudSyncManager {
     this.emit();
 
     try {
-      const fb = this.firebaseFactory();
+      const fb = await this.getFirebase();
       const snap = await fb.getDoc(fb.doc('users', uid));
       if (!this.isSessionCurrent(uid, startEpoch)) {
         return this.getSnapshot();
@@ -1733,7 +1866,7 @@ export class CloudSyncManager {
         this.latestLocalState || currentLocalState || this.storageSvc.load(),
       );
 
-      const fb = this.firebaseFactory();
+      const fb = await this.getFirebase();
       const userRef = fb.doc('users', uid);
       const userSnap = await fb.getDoc(userRef);
       if (!this.isSessionCurrent(uid, startEpoch)) {
@@ -1923,7 +2056,7 @@ export class CloudSyncManager {
         this.latestLocalState || currentLocalState || this.storageSvc.load(),
       );
 
-      const fb = this.firebaseFactory();
+      const fb = await this.getFirebase();
       const userRef = fb.doc('users', uid);
       const userSnap = await fb.getDoc(userRef);
       if (!this.isSessionCurrent(uid, startEpoch)) return;
@@ -2081,7 +2214,7 @@ export class CloudSyncManager {
 
     const run = async () => {
       if (!this.isSessionCurrent(uid, startEpoch)) return false;
-      const fb = this.firebaseFactory();
+      const fb = await this.getFirebase();
       const userRef = fb.doc('users', uid);
       const userSnap = await fb.getDoc(userRef);
       if (!this.isSessionCurrent(uid, startEpoch)) return false;

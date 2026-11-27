@@ -3,9 +3,25 @@ import react from '@vitejs/plugin-react';
 
 process.env.TZ = 'UTC';
 
+const devHmrCspPlugin = {
+  name: 'dev-hmr-csp',
+  apply: 'serve',
+  transformIndexHtml(html) {
+    return html
+      .replace(
+        "script-src 'self' https://apis.google.com;",
+        "script-src 'self' 'unsafe-inline' https://apis.google.com;",
+      )
+      .replace(
+        "connect-src 'self'",
+        "connect-src 'self' ws: wss:",
+      );
+  },
+};
+
 export default defineConfig({
   base: './',
-  plugins: [react()],
+  plugins: [react(), devHmrCspPlugin],
   build: {
     rolldownOptions: {
       output: {
@@ -21,9 +37,7 @@ export default defineConfig({
     },
   },
   server: {
-    host: true,
     port: 5173,
-    allowedHosts: true,
   },
   test: {
     globals: true,
@@ -33,5 +47,11 @@ export default defineConfig({
     },
     setupFiles: ['@testing-library/jest-dom/vitest'],
     include: ['tests/unit/**/*.test.{js,jsx}'],
+    coverage: {
+      provider: 'v8',
+      reporter: ['text', 'html', 'json-summary'],
+      include: ['src/**/*.{js,jsx}'],
+      exclude: ['src/main.jsx', 'src/services/firebase.js'],
+    },
   },
 });

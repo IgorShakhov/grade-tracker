@@ -36,12 +36,14 @@ npm install
 # (Optional) Enable Google Cloud Sync locally by copying .env.example -> .env.local
 cp .env.example .env.local
 
-# Start the local development server (works offline-only even without .env.local)
+# Start the local development server on localhost:5173 (pass `-- --host` to expose on LAN)
 npm run dev
 
-# Run ESLint (--max-warnings 0) and the unit & UI test suite
+# Run ESLint (--max-warnings 0), unit/UI/a11y tests, V8 coverage, and Firestore Emulator rules tests
 npm run lint
 npm test
+npm run test:coverage
+npm run test:rules
 
 # Build the production bundle into ./dist
 npm run build
@@ -49,17 +51,17 @@ npm run build
 
 ## GitHub Pages Deployment
 
-Deployment to GitHub Pages is automated via [`.github/workflows/deploy.yml`](.github/workflows/deploy.yml).
+Deployment to GitHub Pages is automated via [`.github/workflows/deploy.yml`](.github/workflows/deploy.yml), with pull requests gated by [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
 
 1. Push the repository to GitHub with `main` as your default branch.
 2. Under **Settings → Secrets and variables → Actions**, configure the `VITE_FIREBASE_*` repository secrets listed in [`.env.example`](.env.example).
 3. Under **Settings → Pages → Build and deployment → Source**, select **GitHub Actions**.
-4. Every push to `main` (or manual `workflow_dispatch` trigger) runs `npm ci`, `npm test`, and `npm run build`, then publishes `./dist` to GitHub Pages.
+4. Every push to `main` (or manual `workflow_dispatch` trigger) runs `npm ci`, `npm run lint`, `npm test`, and `npm run build`, then publishes `./dist` to GitHub Pages.
 
 ## Cloud Sync & Security Model
 
-Grade Tracker combines instant offline-first `localStorage` ([`src/services/storage.js`](src/services/storage.js)) with Firebase Authentication (Google Sign-In) and Cloud Firestore ([`src/services/cloudSync.js`](src/services/cloudSync.js), [`firestore.rules`](firestore.rules)):
+Grade Tracker combines instant offline-first `localStorage` ([`src/services/storage.js`](src/services/storage.js)) with on-demand Firebase Authentication (Google Sign-In) and Cloud Firestore ([`src/services/cloudSync.js`](src/services/cloudSync.js), [`firestore.rules`](firestore.rules)):
 
-- **Zero Grade Data or Keys in Source**: The public GitHub repository hosts only static application code (`VITE_FIREBASE_*` web app identifiers are injected at build time via GitHub Actions Secrets). All synced course data lives privately in Firestore (`users/{uid}`) and the local browser cache.
-- **Hardened Firestore Rules (`firestore.rules`)**: Uses stateless `firebase/firestore/lite` (zero IndexedDB grade persistence on disk; Firebase Auth stores only the active OAuth session token in IndexedDB until Sign Out). Per-user documents are strictly owner-only (`request.auth.uid == uid`, non-listable) with server-timestamp validation (`updatedAt == request.time`), monotonic revision counters (`rev`) to prevent stale multi-device overwrites, and zero stored PII (no email, name, or photo stored in Firestore).
-- **Revocable Live Read-Only Links (`#view=<token>`)**: Enabling a live link writes a 192-bit random token symmetrically bound 1-to-1 to the owner's `shareToken` via `getAfter(...)` and `!existsAfter(...)` in a single atomic `writeBatch` (zero orphan share docs). Tokens stay in the URL `#` fragment (`no-referrer` enforced in `index.html`) and can be rotated or turned off atomically at any time.
+- **Zero Grade Data or Keys in Source & Lazy Cloud Bundle**: The public GitHub repository hosts only static application code (`VITE_FIREBASE_*` web app identifiers are injected at build time via GitHub Actions Secrets) and self-hosted fonts with a strict `<meta http-equiv="Content-Security-Policy">`. Local-only users never download the Firebase SDK chunk; it loads dynamically on demand when signing in, opening Share, or restoring an active cloud session. All synced course data lives privately in Firestore (`users/{uid}`) and the local browser cache.
+- **Hardened Firestore Rules (`firestore.rules`)**: Uses stateless `firebase/firestore/lite` (zero IndexedDB grade persistence on disk; Firebase Auth stores only the active OAuth session token in IndexedDB until Sign Out). Per-user documents are strictly owner-only (`request.auth.uid == uid`, non-listable) with server-timestamp validation (`updatedAt == request.time`), monotonic revision counters (`rev`) to prevent stale multi-device overwrites, forward schema-version gating (`SchemaTooNewError`), and zero stored PII (no email, name, or photo stored in Firestore).
+- **Revocable Live Read-Only Links (`#view=<token>`)**: Enabling a live link writes a 192-bit random token (storing only opaque `ownerUid`, `stateJson`, and `updatedAt`) symmetrically bound 1-to-1 to the owner's `shareToken` via `getAfter(...)` and `!existsAfter(...)` on both `users/{uid}` and `shares/{token}` in a single atomic `writeBatch` (zero orphan share docs and zero dangling `shareToken` pointers). Tokens stay in the URL `#` fragment (`no-referrer` enforced in `index.html`, with `?view=` and `?share=` query links normalized into `#` fragments) and can be rotated or turned off atomically at any time.

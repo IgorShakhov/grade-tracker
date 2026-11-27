@@ -24,6 +24,7 @@ import {
 } from './services/share.js';
 import {
   cloudSyncManager,
+  preloadFirebaseModule,
   buildLiveShareUrl,
   extractLiveViewTokenFromUrl,
   clearLiveViewFromUrl,
@@ -356,6 +357,19 @@ export default function App() {
         return;
       }
 
+      // Normalize any legacy `?share=` query parameter into `#share=` fragment so snapshot payloads do not stay in address bar/history (#53)
+      const searchParams = new URLSearchParams(window.location.search);
+      if (searchParams.has('share') && typeof window.history?.replaceState === 'function') {
+        const url = new URL(window.location.href);
+        url.searchParams.delete('share');
+        url.hash = `share=${encodeURIComponent(snapToken)}`;
+        window.history.replaceState(
+          window.history.state ?? null,
+          '',
+          `${url.pathname}${url.search}${url.hash}`,
+        );
+      }
+
       const decoded = await decodeShareSnapshot(snapToken);
       if (isCurrent()) {
         if (decoded) {
@@ -366,6 +380,7 @@ export default function App() {
           setLiveShareTokenView(null);
           setSharedState(decoded);
         } else {
+          clearShareParamsFromCurrentUrl(window);
           clearActiveSharedViewIfNeeded();
           showToast(
             'Shared snapshot link was invalid or incomplete; loaded local tracker.',
@@ -641,7 +656,10 @@ export default function App() {
     activeState.terms[0];
 
   const gradeScale = activeState.gradeScale || DEFAULT_GRADE_SCALE;
-  const stats = calculateAllStats(activeState, null);
+  const stats = useMemo(
+    () => calculateAllStats(activeState, null),
+    [activeState],
+  );
 
   const allCoursesInTerm = activeTerm?.courses || [];
   const allCollapsed =
@@ -750,6 +768,7 @@ export default function App() {
 
   // --- Cloud Sync & Auth Handlers ---
   function handleOpenSyncControl() {
+    cloudSyncManager.prepareSignIn();
     setShowShareModal(false);
     setShowScaleModal(false);
     setPendingDelete(null);
@@ -824,6 +843,7 @@ export default function App() {
 
   // --- Unified Share Modal ---
   async function handleOpenShareModal() {
+    preloadFirebaseModule().catch(() => {});
     setShowSyncModal(false);
     setShowScaleModal(false);
     setPendingDelete(null);

@@ -1102,8 +1102,74 @@ describe('Grade Tracker React Application (M1 + M1.1 + Firebase Cloud Sync)', ()
     fireEvent.keyDown(renameInput, { key: 'Enter' });
     expect(within(tablist).getByRole('tab', { name: 'Winter Term' })).toBeInTheDocument();
   });
+
+  it('normalizes legacy ?share=<token> query links into #share=<token> URL fragments on load (#53)', async () => {
+    const { encodeShareSnapshot } = await import('../../src/services/share.js');
+    const { createInitialState } = await import('../../src/domain/templates.js');
+    const sample = createInitialState();
+    sample.studentName = 'Query Shared';
+    const token = await encodeShareSnapshot(sample);
+
+    window.history.replaceState({}, '', `/grade-tracker/?utm_source=1&share=${encodeURIComponent(token)}`);
+    expect(window.location.search).toContain('share=');
+
+    const { unmount } = render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByDisplayValue('Query Shared')).toBeInTheDocument();
+    });
+    expect(screen.getAllByText(/Read-Only Shared Snapshot/i).length).toBeGreaterThan(0);
+    expect(window.location.pathname).toBe('/grade-tracker/');
+    expect(window.location.search).toBe('?utm_source=1');
+    expect(window.location.hash).toBe(`#share=${token}`);
+    unmount();
+
+    // Corrupt snapshot in query/hash cleans up broken share param and loads local tracker
+    window.history.replaceState({}, '', '/?share=corrupt-payload');
+    render(<App />);
+    await waitFor(() => {
+      expect(window.location.search).toBe('');
+      expect(window.location.hash).toBe('');
+    });
+  });
+
+  it('passes automated axe accessibility checks across the main ledger and modal dialogs (#41, #54)', async () => {
+    const { axe } = await import('vitest-axe');
+    // jsdom does not implement HTMLCanvasElement.getContext needed by axe color-contrast; contrast ratios are enforced via WCAG 2.2 AA tokens in index.css
+    const axeOpts = { rules: { 'color-contrast': { enabled: false } } };
+    const { container } = render(<App />);
+
+    // 1. Main ledger view
+    const mainResults = await axe(container, axeOpts);
+    expect(mainResults.violations).toEqual([]);
+
+    // 2. Customize Grading Scale modal
+    fireEvent.click(screen.getByRole('button', { name: /Customize/i }));
+    expect(screen.getByRole('dialog', { name: /Customize Grading Scale/i })).toBeInTheDocument();
+    const scaleModalResults = await axe(container, axeOpts);
+    expect(scaleModalResults.violations).toEqual([]);
+    fireEvent.click(screen.getByRole('button', { name: /Close grading scale editor/i }));
+
+    // 3. Confirm Delete Course modal
+    fireEvent.click(screen.getByRole('button', { name: 'Delete ECON101' }));
+    expect(screen.getByRole('alertdialog')).toBeInTheDocument();
+    const confirmResults = await axe(container, axeOpts);
+    expect(confirmResults.violations).toEqual([]);
+    fireEvent.click(screen.getByRole('button', { name: /^Cancel$/i }));
+
+    // 4. Cloud Sync modal
+    fireEvent.click(screen.getByRole('button', { name: /^Sign In$/i }));
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+    const syncResults = await axe(container, axeOpts);
+    expect(syncResults.violations).toEqual([]);
+    fireEvent.keyDown(document, { key: 'Escape' });
+
+    // 5. Share modal
+    fireEvent.click(screen.getByRole('button', { name: /^Share$/i }));
+    await waitFor(() => {
+      expect(screen.getByRole('dialog', { name: /Share Read-Only View/i })).toBeInTheDocument();
+    });
+    const shareResults = await axe(container, axeOpts);
+    expect(shareResults.violations).toEqual([]);
+  }, 20000);
 });
-
-
-
-
