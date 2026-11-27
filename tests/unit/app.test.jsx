@@ -1312,4 +1312,61 @@ describe('Grade Tracker React Application (M1 + M1.1 + Firebase Cloud Sync)', ()
       });
     }
   });
+
+  it('preserves >2-decimal stored values (33.333 weights and 85.305 grades) on unedited focus and blur without Undo or storage writes (#76)', async () => {
+    const { createInitialState } = await import('../../src/domain/templates.js');
+    const seeded = createInitialState();
+    seeded.terms[0].courses[0].categories = [
+      { id: 'c-1', name: 'Exam 1', weight: 33.333, grade: 85.305 },
+      { id: 'c-2', name: 'Exam 2', weight: 33.333, grade: null },
+      { id: 'c-3', name: 'Exam 3', weight: 33.333, grade: null },
+    ];
+    window.localStorage.setItem('grade_tracker_v1', JSON.stringify(seeded));
+
+    const saveSpy = vi.spyOn(storageService, 'save');
+    try {
+      render(<App />);
+      saveSpy.mockClear();
+
+      const undoBtn = screen.getByRole('button', { name: /↶ Undo/i });
+      const ecoSection = screen.getByRole('region', { name: 'Course ECON101' });
+      const weightInputs = within(ecoSection).getAllByLabelText(
+        /ECON101 .* weight percent/i,
+      );
+      const gradeInputs = within(ecoSection).getAllByLabelText(
+        /ECON101 .* grade percent/i,
+      );
+
+      // Unfocused display shows 2-decimal half-up values ("33.33" and "85.31") and total weight 100.00% without warning
+      expect(weightInputs[0]).toHaveValue('33.33');
+      expect(gradeInputs[0]).toHaveValue('85.31');
+      const weightStatus = ecoSection.querySelector('.weight-status');
+      expect(weightStatus).toHaveTextContent('Weight: 100.00%');
+      expect(weightStatus).not.toHaveClass('weight-warn');
+
+      // Focusing reveals full stored precision ("33.333" and "85.305"), and blurring without edits preserves exact stored values
+      for (const wInput of weightInputs) {
+        fireEvent.focus(wInput);
+        expect(wInput).toHaveValue('33.333');
+        fireEvent.blur(wInput);
+        expect(wInput).toHaveValue('33.33');
+      }
+
+      fireEvent.focus(gradeInputs[0]);
+      expect(gradeInputs[0]).toHaveValue('85.305');
+      fireEvent.blur(gradeInputs[0]);
+      expect(gradeInputs[0]).toHaveValue('85.31');
+
+      expect(undoBtn).toBeDisabled();
+      expect(saveSpy).not.toHaveBeenCalled();
+      expect(weightStatus).toHaveTextContent('Weight: 100.00%');
+      expect(weightStatus).not.toHaveClass('weight-warn');
+
+      const storedCategories = storageService.load().terms[0].courses[0].categories;
+      expect(storedCategories.map((c) => c.weight)).toEqual([33.333, 33.333, 33.333]);
+      expect(storedCategories[0].grade).toBe(85.305);
+    } finally {
+      saveSpy.mockRestore();
+    }
+  });
 });
