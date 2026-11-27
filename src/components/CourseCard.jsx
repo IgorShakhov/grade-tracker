@@ -1,10 +1,11 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import { UNIT_OPTIONS } from '../domain/constants.js';
 import {
   calculateCourseStats,
   buildTargetOptions,
   formatPercent,
   formatGpa,
+  roundHalfUp,
 } from '../domain/calculations.js';
 import { useDraftText } from './useDraftText.js';
 
@@ -35,6 +36,16 @@ function areCellValuesEqual(a, b) {
   return normA === normB;
 }
 
+function formatCellDisplay(value) {
+  return typeof value === 'number' && Number.isFinite(value)
+    ? roundHalfUp(value, 2).toFixed(2)
+    : '';
+}
+
+function formatCellFullPrecision(value) {
+  return typeof value === 'number' && Number.isFinite(value) ? String(value) : '';
+}
+
 function NumericCellInput({
   value,
   placeholder = '—',
@@ -44,20 +55,12 @@ function NumericCellInput({
   onCommit,
 }) {
   const [focused, setFocused] = useState(false);
-  const [draft, setDraft] = useState(() =>
-    typeof value === 'number' && Number.isFinite(value) ? value.toFixed(2) : '',
-  );
-
-  useEffect(() => {
-    if (!focused) {
-      setDraft(
-        typeof value === 'number' && Number.isFinite(value) ? value.toFixed(2) : '',
-      );
-    }
-  }, [value, focused]);
+  const [draft, setDraft] = useState(() => formatCellDisplay(value));
+  const dirtyRef = useRef(false);
 
   function handleChange(e) {
     const raw = e.target.value;
+    dirtyRef.current = true;
     setDraft(raw);
     const parsed = parseDecimalInput(raw);
     if (parsed.kind === 'empty') {
@@ -72,7 +75,12 @@ function NumericCellInput({
   }
 
   function handleBlur() {
+    const wasDirty = dirtyRef.current;
+    dirtyRef.current = false;
     setFocused(false);
+    if (!wasDirty) {
+      return;
+    }
     const parsed = parseDecimalInput(draft);
     if (parsed.kind === 'empty') {
       if (!areCellValuesEqual(null, value)) {
@@ -85,13 +93,13 @@ function NumericCellInput({
       if (!areCellValuesEqual(parsed.value, value)) {
         onCommit(parsed.value);
       }
-      setDraft(parsed.value.toFixed(2));
+      setDraft(formatCellDisplay(parsed.value));
     } else {
-      setDraft(
-        typeof value === 'number' && Number.isFinite(value) ? value.toFixed(2) : '',
-      );
+      setDraft(formatCellDisplay(value));
     }
   }
+
+  const displayedValue = focused ? draft : formatCellDisplay(value);
 
   const isAbove100 =
     typeof value === 'number' && Number.isFinite(value) && value > 100;
@@ -103,7 +111,7 @@ function NumericCellInput({
       className={`cell-input num-input ${isSimInput ? 'sim-input' : ''} ${
         isAbove100 ? 'cell-warn' : ''
       }`.trim()}
-      value={draft}
+      value={displayedValue}
       placeholder={placeholder}
       disabled={disabled}
       aria-label={ariaLabel}
@@ -113,8 +121,12 @@ function NumericCellInput({
           : undefined
       }
       onFocus={(e) => {
+        const fullPrecision = formatCellFullPrecision(value);
+        dirtyRef.current = false;
+        setDraft(fullPrecision);
         setFocused(true);
-        e.target.select();
+        e.currentTarget.value = fullPrecision;
+        e.currentTarget.select();
       }}
       onChange={handleChange}
       onBlur={handleBlur}
