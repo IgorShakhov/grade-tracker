@@ -329,17 +329,18 @@ export default function App() {
   }, [baseState]);
 
   // Persist committed local user edits once outside pure `setDoc` updaters (#14)
+  const { localSaveSeq, needsPersist } = doc;
   useEffect(() => {
-    if (doc.localSaveSeq > lastPersistedSeqRef.current) {
-      lastPersistedSeqRef.current = doc.localSaveSeq;
-      if (doc.needsPersist) {
-        storageService.save(doc.current, {
+    if (localSaveSeq > lastPersistedSeqRef.current) {
+      lastPersistedSeqRef.current = localSaveSeq;
+      if (needsPersist) {
+        storageService.save(state, {
           touchTimestamp: false,
           notifyListeners: false,
         });
       }
     }
-  }, [doc.localSaveSeq, doc.needsPersist, doc.current]);
+  }, [localSaveSeq, needsPersist, state]);
 
   const updateCurrentWithoutHistory = useCallback(
     (updater, { touchTimestamp = false } = {}) => {

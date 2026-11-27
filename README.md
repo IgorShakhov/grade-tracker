@@ -39,7 +39,8 @@ cp .env.example .env.local
 # Start the local development server (works offline-only even without .env.local)
 npm run dev
 
-# Run the unit & UI test suite
+# Run ESLint (--max-warnings 0) and the unit & UI test suite
+npm run lint
 npm test
 
 # Build the production bundle into ./dist
