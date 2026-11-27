@@ -181,7 +181,6 @@ export default function App() {
   const state = doc.current;
   const recoveryNotice = doc.recoveryNotice;
   const stateRef = useRef(state);
-  stateRef.current = state;
   const lastCoalesceRef = useRef({ key: null, time: 0 });
   const lastPersistedLocalSeqRef = useRef(0);
   const lastPersistedCloudSeqRef = useRef(0);
@@ -191,12 +190,16 @@ export default function App() {
   );
   const [sharedState, setSharedState] = useState(null);
   const sharedStateRef = useRef(sharedState);
-  sharedStateRef.current = sharedState;
   const [liveShareTokenView, setLiveShareTokenView] = useState(null);
   const liveShareTokenViewRef = useRef(liveShareTokenView);
-  liveShareTokenViewRef.current = liveShareTokenView;
   const urlRequestSeqRef = useRef(0);
   const [liveRefreshing, setLiveRefreshing] = useState(false);
+
+  useEffect(() => {
+    stateRef.current = state;
+    sharedStateRef.current = sharedState;
+    liveShareTokenViewRef.current = liveShareTokenView;
+  }, [state, sharedState, liveShareTokenView]);
 
   // When non-null, What-If Simulator is active and isolates all edits in memory
   const [sandboxState, setSandboxState] = useState(null);

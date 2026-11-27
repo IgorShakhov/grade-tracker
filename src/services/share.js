@@ -358,8 +358,8 @@ export function extractShareTokenFromUrl(locationLike) {
 
   if (!target) return null;
 
-  let hash = '';
-  let search = '';
+  let hash;
+  let search;
 
   if (typeof target === 'string') {
     try {
