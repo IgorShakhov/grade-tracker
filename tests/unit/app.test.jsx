@@ -1369,4 +1369,59 @@ describe('Grade Tracker React Application (M1 + M1.1 + Firebase Cloud Sync)', ()
       saveSpy.mockRestore();
     }
   });
+
+  it('displays the active term weighted average under <Term> GPA when multiple terms exist (#81)', async () => {
+    const { createInitialState } = await import('../../src/domain/templates.js');
+    const seeded = createInitialState();
+    seeded.terms = [
+      {
+        id: 'term-fall',
+        name: 'Fall Term',
+        courses: [
+          {
+            id: 'c-fall',
+            code: 'FALL101',
+            title: 'Fall Course',
+            units: 1,
+            duration: 'term',
+            passFail: false,
+            collapsed: false,
+            targetPct: 85,
+            categories: [{ id: 'cat-f', name: 'Final', weight: 100, grade: 90 }],
+          },
+        ],
+      },
+      {
+        id: 'term-winter',
+        name: 'Winter Term',
+        courses: [
+          {
+            id: 'c-win',
+            code: 'WIN102',
+            title: 'Winter Course',
+            units: 1,
+            duration: 'term',
+            passFail: false,
+            collapsed: false,
+            targetPct: 85,
+            categories: [{ id: 'cat-w', name: 'Final', weight: 100, grade: 72 }],
+          },
+        ],
+      },
+    ];
+    seeded.activeTermId = 'term-fall';
+    window.localStorage.setItem('grade_tracker_v1', JSON.stringify(seeded));
+
+    render(<App />);
+
+    const metricsRegion = screen.getByRole('region', {
+      name: /GPA and Grade Summary/i,
+    });
+    expect(within(metricsRegion).getByText('Fall Term GPA')).toBeInTheDocument();
+    expect(within(metricsRegion).getByText('Avg 90.0%')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Winter Term' }));
+    expect(within(metricsRegion).getByText('Winter Term GPA')).toBeInTheDocument();
+    expect(within(metricsRegion).getByText('Avg 72.0%')).toBeInTheDocument();
+  });
 });

@@ -200,9 +200,9 @@ export default function HeaderLedger({
                   ? formatGpa(termStats.cumulativeGpa, 1)
                   : formatPercent(overall.weightedAverage, 2)}
               </span>
-              {hasMultipleTerms && overall.weightedAverage !== null && (
+              {hasMultipleTerms && termStats.weightedAverage !== null && (
                 <span className="metric-sub tabular">
-                  Avg {formatPercent(overall.weightedAverage, 1)}
+                  Avg {formatPercent(termStats.weightedAverage, 1)}
                 </span>
               )}
             </div>
