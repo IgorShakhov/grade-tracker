@@ -1093,6 +1093,7 @@ body {
 }
 
 .progress-mini-fill {
+  display: block;
   height: 100%;
   background: var(--navy-700);
   border-radius: 99px;

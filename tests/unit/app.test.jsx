@@ -1172,4 +1172,25 @@ describe('Grade Tracker React Application (M1 + M1.1 + Firebase Cloud Sync)', ()
     const shareResults = await axe(container, axeOpts);
     expect(shareResults.violations).toEqual([]);
   }, 20000);
+
+  it('renders the graded-weight mini progress bar fill with block display and matching width (#71)', async () => {
+    const fs = await import('node:fs');
+    const path = await import('node:path');
+    render(<App />);
+
+    // ECON101 sample course has 60% of 100% syllabus weight graded
+    const ecoSection = screen.getByRole('region', { name: 'Course ECON101' });
+    const fillEl = ecoSection.querySelector('.progress-mini-fill');
+    expect(fillEl).not.toBeNull();
+    expect(fillEl.style.width).toBe('60%');
+
+    // Guard against `<span class="progress-mini-fill">` collapsing to 0x0 as an inline element
+    const cssSource = fs.readFileSync(
+      path.resolve(process.cwd(), 'src/styles/index.css'),
+      'utf8',
+    );
+    const ruleMatch = cssSource.match(/\.progress-mini-fill\s*\{([^}]*)\}/);
+    expect(ruleMatch).not.toBeNull();
+    expect(ruleMatch[1]).toMatch(/display:\s*block\s*;/);
+  });
 });
