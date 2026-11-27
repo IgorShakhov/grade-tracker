@@ -52,7 +52,9 @@ Read this file and [`docs/ROADMAP.md`](docs/ROADMAP.md) first before modifying t
 │   ├── operations.test.js            # Reorder, duplicate, move-to-term, collapse helpers
 │   └── app.test.jsx                  # React integration tests (M1 + M1.1 + Undo/Redo + What-If sandbox + Sign-In & Share UI)
 └── .github/
-    ├── workflows/deploy.yml          # CI/CD: npm ci -> npm test -> npm run build -> deploy ./dist to GitHub Pages
+    ├── dependabot.yml                # Weekly npm & GitHub Actions dependency checks
+    ├── workflows/ci.yml              # PR & push CI: npm ci -> audit -> lint -> test -> build
+    ├── workflows/deploy.yml          # Pages CD: npm ci -> lint -> test -> build -> deploy ./dist
     └── ISSUE_TEMPLATE/               # Structured Bug Report & Feature Request forms
 ```
 
@@ -95,12 +97,13 @@ Read this file and [`docs/ROADMAP.md`](docs/ROADMAP.md) first before modifying t
 
 ```bash
 npm install          # Install dependencies
+npm run lint         # Run ESLint (--max-warnings 0) across src/ and tests/
 npm test             # Run all Vitest unit + React UI tests (must pass 100%)
 npm run build        # Verify production Vite bundle in ./dist
 ```
 
 ### Git & Pull Request Conventions
-- Work on a descriptive branch (`feat/...`, `fix/...`, `docs/...`), verify `npm test && npm run build`, open a Pull Request against `main` with a clear structured summary body, and squash-merge (`gh pr merge --squash --delete-branch`).
+- Work on a descriptive branch (`feat/...`, `fix/...`, `docs/...`), verify `npm run lint && npm test && npm run build`, open a Pull Request against `main` with a clear structured summary body, and squash-merge (`gh pr merge --squash --delete-branch`).
 - The repository is configured with `squash_merge_commit_title=PR_TITLE` and `squash_merge_commit_message=PR_BODY`, so writing a thorough PR description automatically records a clean changelog entry in `git log` on `main` and triggers `.github/workflows/deploy.yml` to publish to GitHub Pages.
 - Check open issues first when picking up new work: `gh issue list --state open`.
 - **Documentation Sync Requirement**: Whenever a PR changes features, architecture invariants, or milestone scope, update `AGENTS.md` and/or `docs/ROADMAP.md` in the **same PR** so future sessions always inherit accurate context.
