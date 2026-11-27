@@ -27,7 +27,7 @@ If you are an AI coding assistant (Antigravity, Cursor, Claude Code, Copilot, et
 
 ## Local Development
 
-Prerequisites: Node.js 22+ and npm.
+Prerequisites: Node.js 22+ and npm (plus Java 21+ and a one-time `npx firebase-tools setup:emulators:firestore` download if running `npm run test:rules` locally).
 
 ```bash
 # Install dependencies
@@ -49,14 +49,21 @@ npm run test:rules
 npm run build
 ```
 
-## GitHub Pages Deployment
+## GitHub Pages & Firestore Rules CI/CD
 
-Deployment to GitHub Pages is automated via [`.github/workflows/deploy.yml`](.github/workflows/deploy.yml), with pull requests gated by [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
-
-1. Push the repository to GitHub with `main` as your default branch.
-2. Under **Settings → Secrets and variables → Actions**, configure the `VITE_FIREBASE_*` repository secrets listed in [`.env.example`](.env.example).
-3. Under **Settings → Pages → Build and deployment → Source**, select **GitHub Actions**.
-4. Every push to `main` (or manual `workflow_dispatch` trigger) runs `npm ci`, `npm run lint`, `npm test`, and `npm run build`, then publishes `./dist` to GitHub Pages.
+- **Pull Request & Push CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml))**: Runs `npm audit --omit=dev --audit-level=high`, `npm run lint`, `npm test`, `npm run build`, and `npm run test:rules` (against the Java 21 Cloud Firestore Emulator) on every PR and push to `main`.
+- **GitHub Pages Deployment ([`.github/workflows/deploy.yml`](.github/workflows/deploy.yml))**:
+  1. Push the repository to GitHub with `main` as your default branch.
+  2. Under **Settings → Secrets and variables → Actions**, configure the `VITE_FIREBASE_*` repository secrets listed in [`.env.example`](.env.example).
+  3. Under **Settings → Pages → Build and deployment → Source**, select **GitHub Actions**.
+  4. Every push to `main` (or manual `workflow_dispatch` trigger) runs `npm ci`, `npm run lint`, `npm test`, and `npm run build`, then publishes `./dist` to GitHub Pages.
+- **Automated Firestore Security Rules Deployment ([`.github/workflows/deploy-rules.yml`](.github/workflows/deploy-rules.yml))**:
+  - Whenever `firestore.rules` (or `firebase.json` / `.firebaserc`) changes on `main` (or via manual `workflow_dispatch`), GitHub Actions re-verifies `npm run test:rules` and deploys `firestore.rules` behind the `firebase-prod` GitHub Environment — eliminating manual Firebase Console copy/paste.
+  - **One-time keyless GCP Workload Identity Federation setup (recommended)**:
+    1. In the Google Cloud project backing Firebase (`grade-tracker-sync`), create a dedicated service account (e.g. `rules-deployer`) granted **only** `Firebase Rules Admin` (`roles/firebaserules.admin`, zero user-data read/write access).
+    2. Create a Workload Identity Pool + OIDC provider (`https://token.actions.githubusercontent.com`) restricted to `assertion.repository == '<owner>/<repo>' && assertion.ref == 'refs/heads/main'`, and grant `roles/iam.workloadIdentityUser` on that service account.
+    3. In GitHub **Settings → Secrets and variables → Actions → Variables**, set `GCP_WIF_PROVIDER` (full provider resource name) and `GCP_RULES_DEPLOYER_SA` (service account email) — or set a `FIREBASE_SERVICE_ACCOUNT` repository secret as a fallback.
+    4. In GitHub **Settings → Environments**, configure `firebase-prod` (optionally adding yourself as a required reviewer and restricting deployments to `main`).
 
 ## Cloud Sync & Security Model
 

@@ -1,0 +1,103 @@
+name: Deploy Firestore Rules
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'firestore.rules'
+      - 'firebase.json'
+      - '.firebaserc'
+      - '.github/workflows/deploy-rules.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: firestore-rules-deploy
+  cancel-in-progress: false
+
+jobs:
+  test-rules:
+    name: Verify Firestore Rules in Emulator
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - name: Setup Java 21
+        uses: actions/setup-java@v6
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Cache Cloud Firestore Emulator JAR
+        id: emulator-cache
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/firebase/emulators
+          key: firestore-emulator-${{ runner.os }}-fbtools-15.37.0
+
+      - name: Download Cloud Firestore Emulator JAR
+        if: steps.emulator-cache.outputs.cache-hit != 'true'
+        run: npx --yes firebase-tools@15.37.0 setup:emulators:firestore
+
+      - name: Run Firestore Security Rules suite
+        run: npm run test:rules
+
+  deploy-rules:
+    name: Deploy Firestore Rules to Production
+    needs: test-rules
+    runs-on: ubuntu-latest
+    environment: firebase-prod
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Resolve authentication mode
+        id: creds
+        env:
+          WIF_PROVIDER: ${{ vars.GCP_WIF_PROVIDER }}
+          WIF_SA: ${{ vars.GCP_RULES_DEPLOYER_SA }}
+          SA_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+        run: |
+          if [ -n "$WIF_PROVIDER" ] && [ -n "$WIF_SA" ]; then
+            echo "mode=wif" >> "$GITHUB_OUTPUT"
+          elif [ -n "$SA_JSON" ]; then
+            echo "mode=sa" >> "$GITHUB_OUTPUT"
+          else
+            echo "mode=unconfigured" >> "$GITHUB_OUTPUT"
+            echo "::notice::Firestore rules deploy skipped — configure GCP_WIF_PROVIDER + GCP_RULES_DEPLOYER_SA repository variables (or FIREBASE_SERVICE_ACCOUNT secret) per README.md to enable automated rules deploys."
+          fi
+
+      - name: Authenticate to Google Cloud via Workload Identity Federation
+        if: steps.creds.outputs.mode == 'wif'
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_RULES_DEPLOYER_SA }}
+
+      - name: Authenticate to Google Cloud via Service Account JSON
+        if: steps.creds.outputs.mode == 'sa'
+        uses: google-github-actions/auth@v3
+        with:
+          credentials_json: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+
+      - name: Setup Node.js
+        if: steps.creds.outputs.mode != 'unconfigured'
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - name: Deploy Firestore Security Rules
+        if: steps.creds.outputs.mode != 'unconfigured'
+        run: npx --yes firebase-tools@15.37.0 deploy --only firestore:rules --project grade-tracker-sync --non-interactive

@@ -19,6 +19,8 @@ Read this file and [`docs/ROADMAP.md`](docs/ROADMAP.md) first before modifying t
 ```text
 .
 ├── .env.example                      # Template for VITE_FIREBASE_* build-time env vars (.env.local gitignored)
+├── .firebaserc                       # Firebase project alias (default -> grade-tracker-sync) for rules deploys
+├── firebase.json                     # Firebase CLI config mapping firestore.rules
 ├── index.html                        # Entry HTML, no-referrer policy, strict meta CSP, <noscript> fallback, SVG icon
 ├── firestore.rules                   # Hardened Firestore v2 security rules (users/{uid} & shares/{token})
 ├── vite.config.js                    # Vite build (base: './', code-split firebase chunk) + Vitest jsdom/coverage config
@@ -59,8 +61,9 @@ Read this file and [`docs/ROADMAP.md`](docs/ROADMAP.md) first before modifying t
 │       └── app.test.jsx              # React integration + vitest-axe a11y tests (M1 + M1.1 + Undo/Redo + What-If + Sync & Share)
 └── .github/
     ├── dependabot.yml                # Weekly npm & GitHub Actions dependency checks
-    ├── workflows/ci.yml              # PR & push CI: npm ci -> audit -> lint -> test -> build
+    ├── workflows/ci.yml              # PR & push CI: verify (audit/lint/test/build) + rules (Java 21 Firestore Emulator)
     ├── workflows/deploy.yml          # Pages CD: npm ci -> lint -> test -> build -> deploy ./dist
+    ├── workflows/deploy-rules.yml    # Automated firestore.rules deploy on main (gated by test:rules + firebase-prod env)
     └── ISSUE_TEMPLATE/               # Structured Bug Report & Feature Request forms
 ```
 
@@ -107,12 +110,12 @@ npm install            # Install dependencies (Node.js >= 22)
 npm run lint           # Run ESLint (--max-warnings 0) across src/ and tests/
 npm test               # Run all Vitest unit, React UI & vitest-axe a11y tests
 npm run test:coverage  # Run Vitest with V8 coverage summary & HTML report
-npm run test:rules     # Verify firestore.rules against the local Java Cloud Firestore Emulator
+npm run test:rules     # Verify firestore.rules against the local Java Cloud Firestore Emulator (requires Java 21 + `npx firebase-tools setup:emulators:firestore` once)
 npm run build          # Verify production Vite bundle in ./dist (zero eager Firebase modulepreload)
 ```
 
 ### Git & Pull Request Conventions
-- Work on a descriptive branch (`feat/...`, `fix/...`, `docs/...`), verify `npm run lint && npm test && npm run build`, open a Pull Request against `main` with a clear structured summary body, and squash-merge (`gh pr merge --squash --delete-branch`).
-- The repository is configured with `squash_merge_commit_title=PR_TITLE` and `squash_merge_commit_message=PR_BODY`, so writing a thorough PR description automatically records a clean changelog entry in `git log` on `main` and triggers `.github/workflows/deploy.yml` to publish to GitHub Pages.
+- Work on a descriptive branch (`feat/...`, `fix/...`, `docs/...`), verify `npm run lint && npm test && npm run build` (plus `npm run test:rules` when modifying `firestore.rules`), open a Pull Request against `main` with a clear structured summary body, and squash-merge (`gh pr merge --squash --delete-branch`).
+- The repository is configured with `squash_merge_commit_title=PR_TITLE` and `squash_merge_commit_message=PR_BODY`, so writing a thorough PR description automatically records a clean changelog entry in `git log` on `main` and triggers `.github/workflows/deploy.yml` (and `.github/workflows/deploy-rules.yml` behind the `firebase-prod` environment when `firestore.rules` changes, keeping rules backward-compatible with currently live clients).
 - Check open issues first when picking up new work: `gh issue list --state open`.
 - **Documentation Sync Requirement**: Whenever a PR changes features, architecture invariants, or milestone scope, update `AGENTS.md` and/or `docs/ROADMAP.md` in the **same PR** so future sessions always inherit accurate context.
