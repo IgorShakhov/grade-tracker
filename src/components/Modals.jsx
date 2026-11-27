@@ -1,5 +1,17 @@
-import { useState, useEffect } from 'react';
-import { DEFAULT_GRADE_SCALE } from '../domain/constants.js';
+import { useState, useEffect, useMemo } from 'react';
+import { DEFAULT_GRADE_SCALE, MAX_GPA_POINTS } from '../domain/constants.js';
+import { deriveTierFromGpa } from '../domain/calculations.js';
+
+const SCALE_DECIMAL_RE = /^(?:\d+(?:\.\d*)?|\.\d+)$/;
+
+function parseScaleNumber(raw) {
+  const normalized = String(raw ?? '').trim().replace(',', '.');
+  if (normalized === '' || !SCALE_DECIMAL_RE.test(normalized)) {
+    return NaN;
+  }
+  const num = Number(normalized);
+  return Number.isFinite(num) ? (num === 0 ? 0 : num) : NaN;
+}
 
 export function ShareModal({
   isSignedIn,
@@ -240,15 +252,18 @@ export function ScaleEditorModal({ gradeScale, onSaveScale, onClose }) {
   }, [onClose]);
 
   function updateRow(idx, field, val) {
+    setError('');
     setRows((prev) => prev.map((r, i) => (i === idx ? { ...r, [field]: val } : r)));
   }
 
   function addBand() {
+    setError('');
     setRows((prev) => [...prev, { min: '0', max: '49', letter: 'F', gpa: '0.0' }]);
   }
 
   function removeBand(idx) {
     if (rows.length <= 1) return;
+    setError('');
     setRows((prev) => prev.filter((_, i) => i !== idx));
   }
 
@@ -264,13 +279,53 @@ export function ScaleEditorModal({ gradeScale, onSaveScale, onClose }) {
     setError('');
   }
 
+  const gapWarning = useMemo(() => {
+    const valid = [];
+    for (const row of rows) {
+      const min = parseScaleNumber(row.min);
+      const max = parseScaleNumber(row.max);
+      const gpa = parseScaleNumber(row.gpa);
+      const letter = String(row.letter ?? '').trim();
+      if (
+        !letter ||
+        !Number.isFinite(min) ||
+        !Number.isFinite(max) ||
+        !Number.isFinite(gpa) ||
+        min < 0 ||
+        max > 100 ||
+        min > max
+      ) {
+        return '';
+      }
+      valid.push({ min, max, letter });
+    }
+    if (valid.length === 0) return '';
+    valid.sort((a, b) => a.min - b.min);
+    const hasDecimalBounds = valid.some(
+      (b) => !Number.isInteger(b.min) || !Number.isInteger(b.max),
+    );
+    const maxAllowedGap = hasDecimalBounds ? 0.1 + 1e-9 : 1;
+    for (let i = 0; i < valid.length - 1; i += 1) {
+      if (valid[i].max >= valid[i + 1].min) {
+        return '';
+      }
+      if (valid[i + 1].min - valid[i].max > maxAllowedGap) {
+        return `Note: Percentage gap between ${valid[i].max}% and ${valid[i + 1].min}% — scores in that range will fall into "${valid[i].letter}".`;
+      }
+    }
+    if (valid[valid.length - 1].max < 100) {
+      return `Note: Highest Max % is ${valid[valid.length - 1].max}% (below 100%).`;
+    }
+    return '';
+  }, [rows]);
+
   function handleSave() {
     const parsed = [];
     for (let i = 0; i < rows.length; i += 1) {
-      const min = Number(rows[i].min);
-      const max = Number(rows[i].max);
-      const gpa = Number(rows[i].gpa);
-      const letter = rows[i].letter.trim();
+      const min = parseScaleNumber(rows[i].min);
+      const max = parseScaleNumber(rows[i].max);
+      const gpa = parseScaleNumber(rows[i].gpa);
+      const letter = String(rows[i].letter ?? '').trim();
       if (
         !letter ||
         !Number.isFinite(min) ||
@@ -280,30 +335,52 @@ export function ScaleEditorModal({ gradeScale, onSaveScale, onClose }) {
         max > 100 ||
         min > max ||
         gpa < 0 ||
-        gpa > 10
+        gpa > MAX_GPA_POINTS
       ) {
-        setError(`Row ${i + 1} has invalid values (ensure 0 <= Min <= Max <= 100 and a valid GPA).`);
+        setError(
+          `Row ${i + 1} has invalid or blank values (ensure non-empty Letter, 0 <= Min <= Max <= 100, and 0 <= GPA <= ${MAX_GPA_POINTS}).`,
+        );
         return;
       }
-      const tier =
-        gpa >= 3.7
-          ? 'tier-a'
-          : gpa >= 2.7
-            ? 'tier-b'
-            : gpa >= 1.7
-              ? 'tier-c'
-              : gpa >= 0.7
-                ? 'tier-d'
-                : 'tier-f';
       parsed.push({
         min,
         max,
         rangeLabel: `${min}–${max}%`,
+        boundLabel: `${max}%`,
         letter,
         gpa,
-        tier,
+        tier: deriveTierFromGpa(gpa),
       });
     }
+
+    const asc = [...parsed].sort((a, b) => a.min - b.min || a.max - b.max);
+    const seenMins = new Set();
+    for (const band of asc) {
+      if (seenMins.has(band.min)) {
+        setError(
+          `Duplicate Min % threshold (${band.min}%). Every grade band must have a unique minimum percentage.`,
+        );
+        return;
+      }
+      seenMins.add(band.min);
+    }
+
+    for (let i = 0; i < asc.length - 1; i += 1) {
+      if (asc[i].max >= asc[i + 1].min) {
+        setError(
+          `Bands "${asc[i].letter}" (${asc[i].min}–${asc[i].max}%) and "${asc[i + 1].letter}" (${asc[i + 1].min}–${asc[i + 1].max}%) overlap.`,
+        );
+        return;
+      }
+    }
+
+    if (!asc.some((band) => band.min === 0)) {
+      setError(
+        'Include a 0% floor band (e.g., 0–49% F with 0.0 GPA) so failing percentages are mapped cleanly.',
+      );
+      return;
+    }
+
     parsed.sort((a, b) => b.min - a.min);
     onSaveScale(parsed);
     onClose();
@@ -337,7 +414,15 @@ export function ScaleEditorModal({ gradeScale, onSaveScale, onClose }) {
           </p>
 
           {error && (
-            <p style={{ color: 'var(--danger-fg)', fontWeight: 600 }}>{error}</p>
+            <p role="alert" style={{ color: 'var(--danger-fg)', fontWeight: 600 }}>
+              {error}
+            </p>
+          )}
+
+          {!error && gapWarning && (
+            <p style={{ color: 'var(--warn-fg, #92400e)', fontWeight: 500 }}>
+              {gapWarning}
+            </p>
           )}
 
           <table className="scale-editor-table">
@@ -356,6 +441,7 @@ export function ScaleEditorModal({ gradeScale, onSaveScale, onClose }) {
                   <td>
                     <input
                       type="number"
+                      step="any"
                       className="scale-editor-input"
                       value={r.min}
                       onChange={(e) => updateRow(idx, 'min', e.target.value)}
@@ -364,6 +450,7 @@ export function ScaleEditorModal({ gradeScale, onSaveScale, onClose }) {
                   <td>
                     <input
                       type="number"
+                      step="any"
                       className="scale-editor-input"
                       value={r.max}
                       onChange={(e) => updateRow(idx, 'max', e.target.value)}
@@ -380,7 +467,7 @@ export function ScaleEditorModal({ gradeScale, onSaveScale, onClose }) {
                   <td>
                     <input
                       type="number"
-                      step="0.1"
+                      step="any"
                       className="scale-editor-input"
                       value={r.gpa}
                       onChange={(e) => updateRow(idx, 'gpa', e.target.value)}

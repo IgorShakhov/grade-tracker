@@ -1,4 +1,5 @@
 export const STORAGE_KEY = 'grade_tracker_v1';
+export const MAX_GPA_POINTS = 100;
 
 export const DEFAULT_GRADE_SCALE = [
   { min: 90, max: 100, rangeLabel: '90–100%', boundLabel: '100%', letter: 'A+', gpa: 4.0, tier: 'tier-a' },

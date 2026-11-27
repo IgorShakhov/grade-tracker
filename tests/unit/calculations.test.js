@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   STORAGE_KEY,
   DEFAULT_GRADE_SCALE,
@@ -219,10 +219,35 @@ describe('Rounding & Formatting Helpers (calculations.js)', () => {
     expect(formatGpa(NaN)).toBe('—');
   });
 
-  it('formats ISO timestamps deterministically in UTC across day boundaries', () => {
+  it('formats ISO timestamps in the active local/IANA timezone (#45) without UTC day-shift on YYYY-MM-DD', () => {
     expect(formatLastUpdated('2026-11-13T09:09:00.000Z')).toBe('Nov 13, 2026');
     expect(formatLastUpdated('2026-11-13T00:05:00.000Z')).toBe('Nov 13, 2026');
     expect(formatLastUpdated('2026-11-13T23:59:59.999Z')).toBe('Nov 13, 2026');
+    // Evening edit in Americas: 2026-11-27T03:00:00Z is Nov 26 in America/Los_Angeles (#45)
+    expect(formatLastUpdated('2026-11-27T03:00:00Z', 'America/Los_Angeles')).toBe(
+      'Nov 26, 2026',
+    );
+    expect(formatLastUpdated('2026-11-27T03:00:00Z', 'Asia/Tokyo')).toBe(
+      'Nov 27, 2026',
+    );
+    // Verify 1-arg call omits `timeZone` (so browsers use the user's real local timezone!)
+    const OrigDTF = Intl.DateTimeFormat;
+    const dtfSpy = vi
+      .spyOn(Intl, 'DateTimeFormat')
+      .mockImplementation(function MockDTF(locale, opts) {
+        expect(opts?.timeZone).toBeUndefined();
+        return new OrigDTF(locale, { ...opts, timeZone: 'America/Los_Angeles' });
+      });
+    try {
+      expect(formatLastUpdated('2026-11-27T03:00:00Z')).toBe('Nov 26, 2026');
+    } finally {
+      dtfSpy.mockRestore();
+    }
+    // Plain date-only strings keep their exact calendar day even in negative UTC offsets
+    expect(formatLastUpdated('2026-11-27', 'America/Los_Angeles')).toBe(
+      'Nov 27, 2026',
+    );
+    expect(formatLastUpdated('2026-02-31')).toBe('—');
     expect(formatLastUpdated('')).toBe('—');
     expect(formatLastUpdated('   ')).toBe('—');
     expect(formatLastUpdated('not-a-date')).toBe('—');
@@ -324,6 +349,105 @@ describe('Grade Scale Lookup (lookupGrade)', () => {
 
     const { overall } = calculateAllStats(stateWithCustomScale);
     expect(overall.cumulativeGpa).toBe(3.0);
+  });
+
+  it('returns 0.0 GPA ("F") below lowest band (#38), supports decimal custom thresholds, derives dynamic Pass/Fail threshold (#39), and builds valid >0% Target options (#40)', async () => {
+    const { getPassingThreshold, buildTargetOptions } = await import(
+      '../../src/domain/calculations.js'
+    );
+
+    const scaleWithoutZero = [
+      { min: 80, max: 100, letter: 'A', gpa: 4.0 },
+      { min: 50, max: 79, letter: 'C', gpa: 2.0 },
+    ];
+    const belowFloor = lookupGrade(30, scaleWithoutZero);
+    expect(belowFloor.gpa).toBe(0);
+    expect(belowFloor.letter).toBe('F');
+    expect(belowFloor.tier).toBe('tier-f');
+    expect(belowFloor.roundedPct).toBe(30);
+
+    // Decimal custom thresholds (`92.8`, `50.2`) compare directly without premature integer rounding
+    const decimalScale = [
+      { min: 92.8, max: 100, letter: 'A', gpa: 4.0 },
+      { min: 50.2, max: 92.7, letter: 'P', gpa: 2.0 },
+      { min: 0, max: 50.1, letter: 'F', gpa: 0.0 },
+    ];
+    expect(lookupGrade(92.6, decimalScale).letter).toBe('P');
+    expect(lookupGrade(92.8, decimalScale).letter).toBe('A');
+    expect(
+      calculateCourseStats(
+        {
+          id: 'pf-dec',
+          code: 'DEC101',
+          units: 0.5,
+          passFail: true,
+          categories: [{ id: 'k1', name: 'Exam', weight: 100, grade: 50.15 }],
+        },
+        null,
+        decimalScale,
+      ).letter,
+    ).toBe('NP');
+    expect(
+      calculateCourseStats(
+        {
+          id: 'pf-dec2',
+          code: 'DEC102',
+          units: 0.5,
+          passFail: true,
+          categories: [{ id: 'k1', name: 'Exam', weight: 100, grade: 50.25 }],
+        },
+        null,
+        decimalScale,
+      ).letter,
+    ).toBe('P');
+
+    const custom60PassScale = [
+      { min: 85, max: 100, letter: 'H', gpa: 4.0 },
+      { min: 60, max: 84, letter: 'P', gpa: 2.0 },
+      { min: 0, max: 59, letter: 'F', gpa: 0.0 },
+    ];
+    expect(getPassingThreshold(custom60PassScale)).toBe(60);
+
+    const pf55 = calculateCourseStats(
+      {
+        id: 'pf-1',
+        code: 'MED101',
+        units: 0.5,
+        passFail: true,
+        categories: [{ id: 'k1', name: 'Exam', weight: 100, grade: 55 }],
+      },
+      null,
+      custom60PassScale,
+    );
+    expect(pf55.letter).toBe('NP');
+    expect(pf55.gpa).toBeNull();
+
+    const pf60 = calculateCourseStats(
+      {
+        id: 'pf-2',
+        code: 'MED102',
+        units: 0.5,
+        passFail: true,
+        categories: [{ id: 'k1', name: 'Exam', weight: 100, grade: 60 }],
+      },
+      null,
+      custom60PassScale,
+    );
+    expect(pf60.letter).toBe('P');
+
+    const opts = buildTargetOptions(custom60PassScale, 88);
+    expect(opts).toEqual([
+      { label: 'H (85%)', pct: 85 },
+      { label: 'Pass (60%)', pct: 60 },
+      { label: 'Custom (88%)', pct: 88 },
+    ]);
+
+    // If a custom scale gives >0 GPA at min: 0, buildTargetOptions never emits invalid pct: 0
+    const zeroGpaPosScale = [
+      { min: 80, max: 100, letter: 'A', gpa: 4.0 },
+      { min: 0, max: 79, letter: 'D', gpa: 1.0 },
+    ];
+    expect(buildTargetOptions(zeroGpaPosScale).every((o) => o.pct > 0)).toBe(true);
   });
 });
 

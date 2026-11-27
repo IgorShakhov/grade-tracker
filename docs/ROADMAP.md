@@ -10,11 +10,11 @@ This document tracks shipped milestones, upcoming features, and key technical de
 - **Inline Course & Assessment Ledger**: Editable course code, title, credit units (`0.25`–`2.0`), assessment category names, syllabus weights (`%`), and earned grades (`%`).
 - **Running Grade & Credit-Weighted GPA Engine**:
   - Weighted running course percentage over graded items (ungraded items remain neutral until entered).
-  - Nearest-integer threshold lookup for Letter Grade and 4.0 GPA scale, plus `Pass/Fail` course toggle.
+  - Nearest-integer threshold lookup for Letter Grade and configurable GPA scale (`0%` floor enforced), plus `Pass/Fail` course toggle with dynamic scale-derived pass threshold.
   - Multi-term support computing both Term GPA and overall unit-weighted Cumulative GPA.
 - **What-If Exam Simulator & Target Calculator**:
   - Toggleable simulator mode to test hypothetical marks without overwriting saved grades.
-  - Per-course target dropdown calculating the exact average needed across remaining ungraded syllabus weight (`secured`, `achievable`, or `unreachable`).
+  - Per-course target dropdown built dynamically from the active `gradeScale` (plus custom percentages) calculating the exact average needed across remaining ungraded syllabus weight (`secured`, `achievable`, or `unreachable`).
 - **Local-First Persistence & Sharing**:
   - Automatic `localStorage` persistence via `StorageService` with strict schema validation, rolling raw corruption backups (`grade_tracker_v1_corrupt_<ts>`), partial course/category salvage, and `CURRENT_SCHEMA_VERSION` forward-compatibility gating (`SchemaTooNewError`).
   - Compressed URL-safe Read-Only Share Snapshot links (`#share=z1....` via `CompressionStream`).

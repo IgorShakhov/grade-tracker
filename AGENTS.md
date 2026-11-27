@@ -66,9 +66,9 @@ Read this file and [`docs/ROADMAP.md`](docs/ROADMAP.md) first before modifying t
 
 1. **Running Course Grade Math (`src/domain/calculations.js`)**:
    - Blank (`grade: null`) assessment categories do **not** penalize the running course grade; `overallGrade` is the weighted average of graded categories only (`weightedPoints / gradedWeight * 100`).
-   - Final course percentage is rounded half-up to the nearest integer (`roundHalfUp(clamped, 0)`) when looking up the letter grade and GPA in `lookupGrade(percentage, gradeScale)`.
-   - Display percentages use half-up rounding (`roundHalfUp(val, 2)`) so IEEE-754 boundary values like `85.305` format consistently as `85.31%`.
-   - Courses with `passFail: true` display `P` / `NP` / `P/F` and are excluded from GPA denominators while still counting toward enrolled credits and weighted percentage averages.
+   - Final course percentage is rounded half-up to the nearest integer (`roundHalfUp(clamped, 0)`) when looking up the letter grade and GPA in `lookupGrade(percentage, gradeScale)`. If `rounded` falls below every configured band's `min`, `lookupGrade` safely returns `{ letter: 'F', gpa: 0, tier: 'tier-f', roundedPct: rounded }` rather than a non-zero GPA (`#38`), and `ScaleEditorModal` requires non-empty cells, unique non-overlapping bands, and a `min === 0` floor band.
+   - Display percentages use half-up rounding (`roundHalfUp(val, 2)`) so IEEE-754 boundary values like `85.305` format consistently as `85.31%`. `formatLastUpdated(isoString, timeZone)` formats timestamps in the user's local timezone by default (`#45`).
+   - Courses with `passFail: true` display `P` / `NP` / `P/F` using the active scale's dynamic passing threshold (`getPassingThreshold(gradeScale)` — lowest `min` with `gpa > 0`, fallback `50%`, `#39`) and are excluded from GPA denominators while still counting toward enrolled credits and weighted percentage averages. Course Target `<select>` options are built dynamically from `gradeScale` (`buildTargetOptions`) plus a `Custom (<pct>%)` entry whenever `targetPct` is non-preset (`#40`).
 
 2. **Atomic State + Undo/Redo (`src/App.jsx`)**:
    - `App.jsx` stores `{ current, past, future, localSaveSeq, cloudSaveSeq }` in a single `doc` state object so `commitState`, `updateCurrentWithoutHistory`, `handleUndo`, and `handleRedo` remain 100% pure under React 19 `<StrictMode>` (`storageService.prepareForSave(...)` inside updaters, persisted once via `useEffect`).
