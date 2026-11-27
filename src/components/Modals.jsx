@@ -3,6 +3,7 @@ import { DEFAULT_GRADE_SCALE } from '../domain/constants.js';
 
 export function ShareModal({
   isSignedIn,
+  isSharedReadOnly = false,
   liveShareUrl,
   snapshotUrl,
   onEnableOrRotateLiveShare,
@@ -52,110 +53,115 @@ export function ShareModal({
             <p style={{ color: 'var(--danger-fg)', fontWeight: 600 }}>{error}</p>
           )}
 
-          <div className="share-section-box">
-            <div className="share-section-head">
-              <strong>Live Auto-Updating Link</strong>
-              {liveShareUrl && <span className="share-badge-active">Active</span>}
-            </div>
-            <p style={{ marginBottom: '0.65rem' }}>
-              Anyone with this link always sees your latest synced grades in
-              read-only mode — no sign-in required to view.
-            </p>
+          {!isSharedReadOnly && (
+            <div className="share-section-box">
+              <div className="share-section-head">
+                <strong>Live Auto-Updating Link</strong>
+                {liveShareUrl && <span className="share-badge-active">Active</span>}
+              </div>
+              <p style={{ marginBottom: '0.65rem' }}>
+                Anyone with this link always sees your latest synced grades in
+                read-only mode — no sign-in required to view.
+              </p>
 
-            {!isSignedIn ? (
-              <button
-                id="share-signin-prompt-btn"
-                type="button"
-                className="btn btn-sm btn-primary"
-                onClick={() => {
-                  onClose();
-                  onOpenSignIn();
-                }}
-              >
-                Sign in with Google to Enable Live Link
-              </button>
-            ) : liveShareUrl ? (
-              <>
-                <div className="share-url-row" style={{ marginBottom: '0.5rem' }}>
-                  <input
-                    id="live-share-url-input"
-                    type="text"
-                    className="share-url-input"
-                    value={liveShareUrl}
-                    readOnly
-                    onFocus={(e) => e.target.select()}
-                  />
-                  <button
-                    id="copy-live-share-btn"
-                    type="button"
-                    className="btn btn-primary btn-sm"
-                    onClick={() =>
-                      onCopyUrl(liveShareUrl, 'Live read-only link copied.')
-                    }
-                  >
-                    Copy Live Link
-                  </button>
-                </div>
-                <div
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'space-between',
-                    gap: '0.5rem',
-                    flexWrap: 'wrap',
+              {!isSignedIn ? (
+                <button
+                  id="share-signin-prompt-btn"
+                  type="button"
+                  className="btn btn-sm btn-primary"
+                  onClick={() => {
+                    onClose();
+                    onOpenSignIn();
                   }}
                 >
-                  <span className="sync-field-hint">
-                    Rotating or turning off revokes future access via the current
-                    link.
-                  </span>
-                  <div style={{ display: 'flex', gap: '0.38rem' }}>
+                  Sign in with Google to Enable Live Link
+                </button>
+              ) : liveShareUrl ? (
+                <>
+                  <div className="share-url-row" style={{ marginBottom: '0.5rem' }}>
+                    <input
+                      id="live-share-url-input"
+                      type="text"
+                      className="share-url-input"
+                      value={liveShareUrl}
+                      readOnly
+                      onFocus={(e) => e.target.select()}
+                    />
                     <button
-                      id="rotate-live-share-btn"
+                      id="copy-live-share-btn"
                       type="button"
-                      className="btn btn-sm"
-                      disabled={busy !== null}
+                      className="btn btn-primary btn-sm"
                       onClick={() =>
-                        runShareOp('rotate', () => onEnableOrRotateLiveShare(true))
+                        onCopyUrl(liveShareUrl, 'Live read-only link copied.')
                       }
                     >
-                      {busy === 'rotate' ? 'Rotating…' : 'Rotate Link'}
-                    </button>
-                    <button
-                      id="disable-live-share-btn"
-                      type="button"
-                      className="btn btn-sm"
-                      disabled={busy !== null}
-                      onClick={() => runShareOp('disable', onDisableLiveShare)}
-                    >
-                      {busy === 'disable' ? 'Turning off…' : 'Turn Off'}
+                      Copy Live Link
                     </button>
                   </div>
-                </div>
-              </>
-            ) : (
-              <button
-                id="enable-live-share-btn"
-                type="button"
-                className="btn btn-primary btn-sm"
-                disabled={busy !== null}
-                onClick={() =>
-                  runShareOp('enable', () => onEnableOrRotateLiveShare(false))
-                }
-              >
-                {busy === 'enable' ? 'Creating link…' : 'Enable Live Read-Only Link'}
-              </button>
-            )}
-          </div>
+                  <div
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      gap: '0.5rem',
+                      flexWrap: 'wrap',
+                    }}
+                  >
+                    <span className="sync-field-hint">
+                      Rotating or turning off revokes future access via the current
+                      link.
+                    </span>
+                    <div style={{ display: 'flex', gap: '0.38rem' }}>
+                      <button
+                        id="rotate-live-share-btn"
+                        type="button"
+                        className="btn btn-sm"
+                        disabled={busy !== null}
+                        onClick={() =>
+                          runShareOp('rotate', () => onEnableOrRotateLiveShare(true))
+                        }
+                      >
+                        {busy === 'rotate' ? 'Rotating…' : 'Rotate Link'}
+                      </button>
+                      <button
+                        id="disable-live-share-btn"
+                        type="button"
+                        className="btn btn-sm"
+                        disabled={busy !== null}
+                        onClick={() => runShareOp('disable', onDisableLiveShare)}
+                      >
+                        {busy === 'disable' ? 'Turning off…' : 'Turn Off'}
+                      </button>
+                    </div>
+                  </div>
+                </>
+              ) : (
+                <button
+                  id="enable-live-share-btn"
+                  type="button"
+                  className="btn btn-primary btn-sm"
+                  disabled={busy !== null}
+                  onClick={() =>
+                    runShareOp('enable', () => onEnableOrRotateLiveShare(false))
+                  }
+                >
+                  {busy === 'enable'
+                    ? 'Creating link…'
+                    : 'Enable Live Read-Only Link'}
+                </button>
+              )}
+            </div>
+          )}
 
-          {snapshotUrl && (
+          {snapshotUrl ? (
             <div className="share-section-box" style={{ marginBottom: 0 }}>
               <div className="share-section-head">
                 <strong>One-Time Point-in-Time Snapshot</strong>
               </div>
               <p style={{ marginBottom: '0.6rem' }}>
-                Self-contained URL frozen at your current grades right now (works
-                even without cloud sync).
+                {isSharedReadOnly
+                  ? 'Self-contained URL frozen at the shared grades currently shown on screen.'
+                  : 'Self-contained URL frozen at your current grades right now (works even without cloud sync).'}
               </p>
               <div className="share-url-row" style={{ marginBottom: 0 }}>
                 <input
@@ -181,6 +187,12 @@ export function ShareModal({
                 </button>
               </div>
             </div>
+          ) : (
+            isSharedReadOnly && (
+              <p style={{ marginBottom: 0 }}>
+                Could not generate a snapshot link for this view.
+              </p>
+            )
           )}
         </div>
       </div>
