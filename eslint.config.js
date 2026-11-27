@@ -8,7 +8,7 @@ export default [
   },
   js.configs.recommended,
   {
-    files: ['src/**/*.{js,jsx}', 'tests/**/*.{js,jsx,mjs}'],
+    files: ['src/**/*.{js,jsx}', 'tests/**/*.{js,jsx,mjs}', 'scripts/**/*.mjs'],
     languageOptions: {
       ecmaVersion: 'latest',
       sourceType: 'module',
@@ -38,7 +38,7 @@ export default [
     },
   },
   {
-    files: ['tests/**/*.{js,jsx,mjs}'],
+    files: ['tests/**/*.{js,jsx,mjs}', 'scripts/**/*.mjs'],
     languageOptions: {
       globals: {
         ...globals.node,
