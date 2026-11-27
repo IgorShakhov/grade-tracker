@@ -16,35 +16,48 @@ function getFocusableElements(container) {
   );
 }
 
+let openModalCount = 0;
+let savedInertSnapshot = null;
+let originTriggerElement = null;
+
 /**
- * Accessible modal focus management (#41):
- * 1. Saves trigger element (`document.activeElement`) on open.
- * 2. Marks background `.app-root` siblings `inert` while modal is open.
+ * Accessible modal focus management (#41, #74, #75):
+ * 1. Saves origin trigger element (`document.activeElement`) on first modal open and preserves it across modal-to-modal hand-offs.
+ * 2. Marks background `.app-root` siblings (excluding `.modal-backdrop` and `.toast-live-region`) `inert` via a reference-counted snapshot so same-commit modal hand-offs never snapshot or restore stale `inert = true`.
  * 3. Moves initial focus inside `panelRef` (or `initialFocusSelector`, e.g. Cancel on destructive dialogs).
  * 4. Traps `Tab` and `Shift+Tab` cyclically inside `panelRef`.
- * 5. Restores focus to the trigger element on close unless another modal took focus.
+ * 5. Restores focus to the non-inert origin trigger element once the last modal closes.
  */
 export function useDialogFocus(panelRef, { initialFocusSelector = null } = {}) {
   useEffect(() => {
     const panel = panelRef.current;
     if (!panel || typeof document === 'undefined') return undefined;
 
-    const previouslyFocused =
-      document.activeElement instanceof HTMLElement &&
-      document.activeElement !== document.body
-        ? document.activeElement
-        : null;
+    if (openModalCount === 0) {
+      if (!originTriggerElement) {
+        const active = document.activeElement;
+        originTriggerElement =
+          active instanceof HTMLElement &&
+          active !== document.body &&
+          !active.closest('.modal-panel')
+            ? active
+            : null;
+      }
 
-    const backgroundSiblings = Array.from(
-      document.querySelectorAll('.app-root > :not(.modal-backdrop)'),
-    );
-    const prevInertStates = backgroundSiblings.map((el) => ({
-      el,
-      inert: Boolean(el.inert),
-    }));
-    for (const { el } of prevInertStates) {
-      el.inert = true;
+      const backgroundSiblings = Array.from(
+        document.querySelectorAll(
+          '.app-root > :not(.modal-backdrop):not(.toast-live-region)',
+        ),
+      );
+      savedInertSnapshot = backgroundSiblings.map((el) => ({
+        el,
+        inert: Boolean(el.inert),
+      }));
+      for (const { el } of savedInertSnapshot) {
+        el.inert = true;
+      }
     }
+    openModalCount += 1;
 
     const preferredTarget = initialFocusSelector
       ? panel.querySelector(initialFocusSelector)
@@ -99,20 +112,28 @@ export function useDialogFocus(panelRef, { initialFocusSelector = null } = {}) {
     return () => {
       document.removeEventListener('keydown', handleKeyDown);
 
-      const stillHasOpenModal =
-        document.querySelectorAll('.modal-backdrop').length > 0;
-      if (!stillHasOpenModal) {
-        for (const { el, inert } of prevInertStates) {
+      openModalCount = Math.max(0, openModalCount - 1);
+      if (openModalCount === 0 && savedInertSnapshot) {
+        for (const { el, inert } of savedInertSnapshot) {
           el.inert = inert;
         }
+        savedInertSnapshot = null;
       }
 
-      if (
-        previouslyFocused &&
-        previouslyFocused.isConnected &&
-        !document.activeElement?.closest?.('.modal-panel')
-      ) {
-        previouslyFocused.focus();
+      const hasMountedModal =
+        document.querySelectorAll('.modal-backdrop').length > 0;
+      if (!hasMountedModal && openModalCount === 0) {
+        const targetToFocus = originTriggerElement;
+        originTriggerElement = null;
+        if (
+          targetToFocus &&
+          targetToFocus.isConnected &&
+          !targetToFocus.inert &&
+          !targetToFocus.closest('[inert]') &&
+          !document.activeElement?.closest?.('.modal-panel')
+        ) {
+          targetToFocus.focus();
+        }
       }
     };
   }, [panelRef, initialFocusSelector]);
