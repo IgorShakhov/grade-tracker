@@ -220,14 +220,6 @@ body {
   opacity: 0.45;
 }
 
-.sync-pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.35rem;
-  color: var(--text-secondary);
-  font-weight: 500;
-}
-
 .sync-indicator {
   width: 7px;
   height: 7px;
@@ -1221,7 +1213,7 @@ body {
 }
 
 /* ==========================================================================
-   Modals (Share Link, Data & Templates, Scale Editor)
+   Modals (Share, Cloud Sync, Conflict, Scale Editor, Confirm)
    ========================================================================== */
 
 .modal-backdrop {

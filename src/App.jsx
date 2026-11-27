@@ -174,6 +174,9 @@ export default function App() {
       setSyncSnapshot(nextSnap);
       if (nextSnap.status === 'conflict') {
         setShowSyncModal(false);
+        setShowShareModal(false);
+        setShowScaleModal(false);
+        setPendingDelete(null);
       } else {
         setConflictDismissed(false);
       }
