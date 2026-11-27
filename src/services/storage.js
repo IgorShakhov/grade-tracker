@@ -97,162 +97,293 @@ function normalizeGradeScale(rawScale) {
   return normalized;
 }
 
+export const CURRENT_SCHEMA_VERSION = 1;
+export const MAX_CORRUPT_BACKUPS = 2;
+
+export class SchemaTooNewError extends Error {
+  constructor(foundVersion, maxSupportedVersion = CURRENT_SCHEMA_VERSION) {
+    super(
+      `Tracker data uses schema version ${foundVersion}, which is newer than this app supports (v${maxSupportedVersion}). Reload the page to update Grade Tracker before editing.`,
+    );
+    this.name = 'SchemaTooNewError';
+    this.code = 'storage/schema-too-new';
+    this.foundVersion = foundVersion;
+    this.maxSupportedVersion = maxSupportedVersion;
+  }
+}
+
+export function isSchemaTooNewError(err) {
+  return (
+    err instanceof SchemaTooNewError || err?.code === 'storage/schema-too-new'
+  );
+}
+
 /**
- * Deeply validates and normalizes a raw TrackerState object without mutating input.
- * Throws a descriptive Error on any structural or type violation.
+ * Forward migration registry keyed by source schema version (`0 -> 1`, `1 -> 2`, ...).
+ * Add `1: (rawV1) => ({ ... })` here when bumping `CURRENT_SCHEMA_VERSION` to `2` in M3.
  */
-export function validateTrackerState(raw) {
+const SCHEMA_MIGRATIONS = {};
+
+function runSchemaMigrations(raw) {
   if (!isPlainObject(raw)) {
     throw new Error('Invalid tracker state: root value must be a JSON object.');
   }
 
-  if (raw.studentName !== undefined && typeof raw.studentName !== 'string') {
+  if (raw.version !== undefined) {
+    if (
+      typeof raw.version !== 'number' ||
+      !Number.isInteger(raw.version) ||
+      raw.version < 0
+    ) {
+      throw new Error(
+        'Invalid tracker state: "version" must be a non-negative integer.',
+      );
+    }
+    if (raw.version > CURRENT_SCHEMA_VERSION) {
+      throw new SchemaTooNewError(raw.version, CURRENT_SCHEMA_VERSION);
+    }
+  }
+
+  let current = raw;
+  let v = typeof raw.version === 'number' ? raw.version : 0;
+  while (v < CURRENT_SCHEMA_VERSION) {
+    const migrate = SCHEMA_MIGRATIONS[v];
+    if (typeof migrate === 'function') {
+      current = migrate(current);
+    }
+    v += 1;
+  }
+  return current;
+}
+
+function normalizeSingleCategory(cat, tIdx, cIdx, kIdx, courseCode, usedCatIds) {
+  if (!isPlainObject(cat)) {
+    throw new Error(
+      `Invalid tracker state: category at index ${kIdx} in "${courseCode}" must be an object.`,
+    );
+  }
+  if (cat.id !== undefined && typeof cat.id !== 'string') {
+    throw new Error(
+      `Invalid tracker state: category at index ${kIdx} in "${courseCode}" has non-string "id".`,
+    );
+  }
+  if (typeof cat.name !== 'string') {
+    throw new Error(
+      `Invalid tracker state: category at index ${kIdx} in "${courseCode}" must have a string "name".`,
+    );
+  }
+  if (
+    typeof cat.weight !== 'number' ||
+    !Number.isFinite(cat.weight) ||
+    cat.weight < 0 ||
+    cat.weight > 1000
+  ) {
+    throw new Error(
+      `Invalid tracker state: category "${cat.name}" in "${courseCode}" must have a finite "weight" between 0 and 1000.`,
+    );
+  }
+  const normalizedWeight = cat.weight === 0 ? 0 : cat.weight;
+
+  let normalizedGrade = null;
+  if (cat.grade !== null && cat.grade !== undefined) {
+    if (
+      typeof cat.grade !== 'number' ||
+      !Number.isFinite(cat.grade) ||
+      cat.grade < 0 ||
+      cat.grade > 1000
+    ) {
+      throw new Error(
+        `Invalid tracker state: category "${cat.name}" in "${courseCode}" must have null or a finite "grade" between 0 and 1000.`,
+      );
+    }
+    normalizedGrade = cat.grade === 0 ? 0 : cat.grade;
+  }
+
+  const catId = makeUniqueId(
+    cat.id,
+    `cat-${tIdx + 1}-${cIdx + 1}-${kIdx + 1}`,
+    usedCatIds,
+  );
+
+  return {
+    id: catId,
+    name: cat.name,
+    weight: normalizedWeight,
+    grade: normalizedGrade,
+  };
+}
+
+function normalizeCourseHeaderFields(course, tIdx, cIdx, termName, usedCourseIds) {
+  if (!isPlainObject(course)) {
+    throw new Error(
+      `Invalid tracker state: course at index ${cIdx} in "${termName}" must be an object.`,
+    );
+  }
+  if (course.id !== undefined && typeof course.id !== 'string') {
+    throw new Error(
+      `Invalid tracker state: course at index ${cIdx} in "${termName}" has non-string "id".`,
+    );
+  }
+  if (typeof course.code !== 'string' || course.code.trim() === '') {
+    throw new Error(
+      `Invalid tracker state: course at index ${cIdx} in "${termName}" must have a non-empty string "code".`,
+    );
+  }
+  if (course.title !== undefined && typeof course.title !== 'string') {
+    throw new Error(
+      `Invalid tracker state: course "${course.code}" must have a string "title".`,
+    );
+  }
+  if (
+    typeof course.units !== 'number' ||
+    !Number.isFinite(course.units) ||
+    course.units <= 0 ||
+    course.units > 100
+  ) {
+    throw new Error(
+      `Invalid tracker state: course "${course.code}" must have a finite numeric "units" greater than 0 and at most 100.`,
+    );
+  }
+  const normalizedUnits = course.units === 0 ? 0 : course.units;
+
+  const rawPassFail =
+    course.passFail !== undefined ? course.passFail : course.creditNoCredit;
+  let passFail = false;
+  if (rawPassFail !== undefined) {
+    if (
+      typeof rawPassFail === 'boolean' ||
+      rawPassFail === 0 ||
+      rawPassFail === 1
+    ) {
+      passFail = Boolean(rawPassFail);
+    } else {
+      throw new Error(
+        `Invalid tracker state: course "${course.code}" has invalid "passFail" flag.`,
+      );
+    }
+  }
+
+  const duration = course.duration === 'full-year' ? 'full-year' : 'term';
+  const collapsed = Boolean(course.collapsed);
+
+  let targetPct = 85;
+  if (course.targetPct !== undefined) {
+    if (
+      typeof course.targetPct !== 'number' ||
+      !Number.isFinite(course.targetPct) ||
+      course.targetPct <= 0 ||
+      course.targetPct > 100
+    ) {
+      throw new Error(
+        `Invalid tracker state: course "${course.code}" must have "targetPct" between 1 and 100.`,
+      );
+    }
+    targetPct = course.targetPct === 0 ? 0 : course.targetPct;
+  }
+
+  if (!Array.isArray(course.categories)) {
+    throw new Error(
+      `Invalid tracker state: course "${course.code}" must have a "categories" array.`,
+    );
+  }
+
+  const courseId = makeUniqueId(
+    course.id,
+    `c-${tIdx + 1}-${cIdx + 1}`,
+    usedCourseIds,
+  );
+
+  return {
+    id: courseId,
+    code: course.code.trim(),
+    title: course.title ?? '',
+    units: normalizedUnits,
+    duration,
+    passFail,
+    collapsed,
+    targetPct,
+  };
+}
+
+/**
+ * Deeply validates and normalizes a raw TrackerState object without mutating input.
+ * Throws `SchemaTooNewError` if `raw.version > CURRENT_SCHEMA_VERSION`, or a descriptive
+ * Error on any structural or type violation.
+ */
+export function validateTrackerState(raw) {
+  const migrated = runSchemaMigrations(raw);
+
+  if (migrated.studentName !== undefined && typeof migrated.studentName !== 'string') {
     throw new Error('Invalid tracker state: "studentName" must be a string.');
   }
-  if (raw.lastUpdated !== undefined && typeof raw.lastUpdated !== 'string') {
-    throw new Error('Invalid tracker state: "lastUpdated" must be an ISO timestamp string.');
+  if (migrated.lastUpdated !== undefined && typeof migrated.lastUpdated !== 'string') {
+    throw new Error(
+      'Invalid tracker state: "lastUpdated" must be an ISO timestamp string.',
+    );
   }
-  if (raw.activeTermId !== undefined && typeof raw.activeTermId !== 'string') {
+  if (migrated.activeTermId !== undefined && typeof migrated.activeTermId !== 'string') {
     throw new Error('Invalid tracker state: "activeTermId" must be a string.');
   }
 
-  if (!Array.isArray(raw.terms) || raw.terms.length === 0) {
+  if (!Array.isArray(migrated.terms) || migrated.terms.length === 0) {
     throw new Error('Invalid tracker state: "terms" must be a non-empty array.');
   }
 
-  const studentName = (raw.studentName || '').trim() || 'My';
-  const lastUpdated = (raw.lastUpdated || '').trim() || new Date().toISOString();
-  const gradeScale = normalizeGradeScale(raw.gradeScale);
+  const studentName = (migrated.studentName || '').trim() || 'My';
+  const lastUpdated =
+    (migrated.lastUpdated || '').trim() || new Date().toISOString();
+  const gradeScale = normalizeGradeScale(migrated.gradeScale);
 
   const usedTermIds = new Set();
   const usedCourseIds = new Set();
   const usedCatIds = new Set();
 
-  const normalizedTerms = raw.terms.map((term, tIdx) => {
+  const normalizedTerms = migrated.terms.map((term, tIdx) => {
     if (!isPlainObject(term)) {
-      throw new Error(`Invalid tracker state: term at index ${tIdx} must be an object.`);
+      throw new Error(
+        `Invalid tracker state: term at index ${tIdx} must be an object.`,
+      );
     }
     if (term.id !== undefined && typeof term.id !== 'string') {
-      throw new Error(`Invalid tracker state: term at index ${tIdx} has non-string "id".`);
+      throw new Error(
+        `Invalid tracker state: term at index ${tIdx} has non-string "id".`,
+      );
     }
     if (term.name !== undefined && typeof term.name !== 'string') {
-      throw new Error(`Invalid tracker state: term at index ${tIdx} has non-string "name".`);
+      throw new Error(
+        `Invalid tracker state: term at index ${tIdx} has non-string "name".`,
+      );
     }
 
     const termId = makeUniqueId(term.id, `term-${tIdx + 1}`, usedTermIds);
     const termName = (term.name || '').trim() || `Term ${tIdx + 1}`;
 
     if (!Array.isArray(term.courses)) {
-      throw new Error(`Invalid tracker state: term "${termName}" must have a "courses" array.`);
+      throw new Error(
+        `Invalid tracker state: term "${termName}" must have a "courses" array.`,
+      );
     }
 
     const normalizedCourses = term.courses.map((course, cIdx) => {
-      if (!isPlainObject(course)) {
-        throw new Error(`Invalid tracker state: course at index ${cIdx} in "${termName}" must be an object.`);
-      }
-      if (course.id !== undefined && typeof course.id !== 'string') {
-        throw new Error(`Invalid tracker state: course at index ${cIdx} in "${termName}" has non-string "id".`);
-      }
-      if (typeof course.code !== 'string' || course.code.trim() === '') {
-        throw new Error(`Invalid tracker state: course at index ${cIdx} in "${termName}" must have a non-empty string "code".`);
-      }
-      if (course.title !== undefined && typeof course.title !== 'string') {
-        throw new Error(`Invalid tracker state: course "${course.code}" must have a string "title".`);
-      }
-      if (
-        typeof course.units !== 'number' ||
-        !Number.isFinite(course.units) ||
-        course.units <= 0 ||
-        course.units > 100
-      ) {
-        throw new Error(`Invalid tracker state: course "${course.code}" must have a finite numeric "units" greater than 0 and at most 100.`);
-      }
-      const normalizedUnits = course.units === 0 ? 0 : course.units;
-
-      const rawPassFail = course.passFail !== undefined ? course.passFail : course.creditNoCredit;
-      let passFail = false;
-      if (rawPassFail !== undefined) {
-        if (typeof rawPassFail === 'boolean' || rawPassFail === 0 || rawPassFail === 1) {
-          passFail = Boolean(rawPassFail);
-        } else {
-          throw new Error(`Invalid tracker state: course "${course.code}" has invalid "passFail" flag.`);
-        }
-      }
-
-      const duration = course.duration === 'full-year' ? 'full-year' : 'term';
-      const collapsed = Boolean(course.collapsed);
-
-      let targetPct = 85;
-      if (course.targetPct !== undefined) {
-        if (
-          typeof course.targetPct !== 'number' ||
-          !Number.isFinite(course.targetPct) ||
-          course.targetPct <= 0 ||
-          course.targetPct > 100
-        ) {
-          throw new Error(`Invalid tracker state: course "${course.code}" must have "targetPct" between 1 and 100.`);
-        }
-        targetPct = course.targetPct === 0 ? 0 : course.targetPct;
-      }
-
-      if (!Array.isArray(course.categories)) {
-        throw new Error(`Invalid tracker state: course "${course.code}" must have a "categories" array.`);
-      }
-
-      const courseId = makeUniqueId(course.id, `c-${tIdx + 1}-${cIdx + 1}`, usedCourseIds);
-
-      const normalizedCategories = course.categories.map((cat, kIdx) => {
-        if (!isPlainObject(cat)) {
-          throw new Error(`Invalid tracker state: category at index ${kIdx} in "${course.code}" must be an object.`);
-        }
-        if (cat.id !== undefined && typeof cat.id !== 'string') {
-          throw new Error(`Invalid tracker state: category at index ${kIdx} in "${course.code}" has non-string "id".`);
-        }
-        if (typeof cat.name !== 'string') {
-          throw new Error(`Invalid tracker state: category at index ${kIdx} in "${course.code}" must have a string "name".`);
-        }
-        if (
-          typeof cat.weight !== 'number' ||
-          !Number.isFinite(cat.weight) ||
-          cat.weight < 0 ||
-          cat.weight > 1000
-        ) {
-          throw new Error(`Invalid tracker state: category "${cat.name}" in "${course.code}" must have a finite "weight" between 0 and 1000.`);
-        }
-        const normalizedWeight = cat.weight === 0 ? 0 : cat.weight;
-
-        let normalizedGrade = null;
-        if (cat.grade !== null && cat.grade !== undefined) {
-          if (
-            typeof cat.grade !== 'number' ||
-            !Number.isFinite(cat.grade) ||
-            cat.grade < 0 ||
-            cat.grade > 1000
-          ) {
-            throw new Error(`Invalid tracker state: category "${cat.name}" in "${course.code}" must have null or a finite "grade" between 0 and 1000.`);
-          }
-          normalizedGrade = cat.grade === 0 ? 0 : cat.grade;
-        }
-
-        const catId = makeUniqueId(cat.id, `cat-${tIdx + 1}-${cIdx + 1}-${kIdx + 1}`, usedCatIds);
-
-        return {
-          id: catId,
-          name: cat.name,
-          weight: normalizedWeight,
-          grade: normalizedGrade,
-        };
-      });
-
+      const header = normalizeCourseHeaderFields(
+        course,
+        tIdx,
+        cIdx,
+        termName,
+        usedCourseIds,
+      );
+      const normalizedCategories = course.categories.map((cat, kIdx) =>
+        normalizeSingleCategory(
+          cat,
+          tIdx,
+          cIdx,
+          kIdx,
+          header.code,
+          usedCatIds,
+        ),
+      );
       return {
-        id: courseId,
-        code: course.code.trim(),
-        title: course.title ?? '',
-        units: normalizedUnits,
-        duration,
-        passFail,
-        collapsed,
-        targetPct,
+        ...header,
         categories: normalizedCategories,
       };
     });
@@ -264,12 +395,12 @@ export function validateTrackerState(raw) {
     };
   });
 
-  const activeTermId = normalizedTerms.some((t) => t.id === raw.activeTermId)
-    ? raw.activeTermId
+  const activeTermId = normalizedTerms.some((t) => t.id === migrated.activeTermId)
+    ? migrated.activeTermId
     : normalizedTerms[0].id;
 
   return {
-    version: 1,
+    version: CURRENT_SCHEMA_VERSION,
     studentName,
     lastUpdated,
     activeTermId,
@@ -278,9 +409,152 @@ export function validateTrackerState(raw) {
   };
 }
 
+/**
+ * Attempts per-term, per-course, and per-category salvage on a partially corrupted
+ * JSON object so valid sibling courses survive single-field corruption (#36).
+ * Returns `{ state, droppedCount }` when salvageable, or `null` if no valid courses remain.
+ */
+function salvageTrackerState(raw) {
+  if (!isPlainObject(raw) || !Array.isArray(raw.terms) || raw.terms.length === 0) {
+    return null;
+  }
+
+  let droppedCount = 0;
+  if (
+    raw.version !== undefined &&
+    (typeof raw.version !== 'number' ||
+      !Number.isInteger(raw.version) ||
+      raw.version < 0)
+  ) {
+    droppedCount += 1;
+  }
+  if (raw.studentName !== undefined && typeof raw.studentName !== 'string') {
+    droppedCount += 1;
+  }
+  if (raw.lastUpdated !== undefined && typeof raw.lastUpdated !== 'string') {
+    droppedCount += 1;
+  }
+  if (raw.activeTermId !== undefined && typeof raw.activeTermId !== 'string') {
+    droppedCount += 1;
+  }
+
+  const studentName =
+    typeof raw.studentName === 'string' && raw.studentName.trim() !== ''
+      ? raw.studentName.trim()
+      : 'My';
+  const lastUpdated =
+    typeof raw.lastUpdated === 'string' && raw.lastUpdated.trim() !== ''
+      ? raw.lastUpdated.trim()
+      : new Date().toISOString();
+  const gradeScale = normalizeGradeScale(raw.gradeScale);
+
+  const usedTermIds = new Set();
+  const usedCourseIds = new Set();
+  const usedCatIds = new Set();
+  let hadAnyRawCourses = false;
+  let salvagedCourseCount = 0;
+
+  const salvagedTerms = [];
+  raw.terms.forEach((term, tIdx) => {
+    if (!isPlainObject(term) || !Array.isArray(term.courses)) {
+      droppedCount += 1;
+      return;
+    }
+    const safeIdInput = typeof term.id === 'string' ? term.id : undefined;
+    const safeNameInput = typeof term.name === 'string' ? term.name : '';
+    if (
+      (term.id !== undefined && typeof term.id !== 'string') ||
+      (term.name !== undefined && typeof term.name !== 'string')
+    ) {
+      droppedCount += 1;
+    }
+
+    const termId = makeUniqueId(safeIdInput, `term-${tIdx + 1}`, usedTermIds);
+    const termName = safeNameInput.trim() || `Term ${tIdx + 1}`;
+    if (term.courses.length > 0) {
+      hadAnyRawCourses = true;
+    }
+
+    const salvagedCourses = [];
+    term.courses.forEach((course, cIdx) => {
+      let header;
+      try {
+        header = normalizeCourseHeaderFields(
+          course,
+          tIdx,
+          cIdx,
+          termName,
+          usedCourseIds,
+        );
+      } catch {
+        droppedCount += 1;
+        return;
+      }
+
+      const salvagedCategories = [];
+      course.categories.forEach((cat, kIdx) => {
+        try {
+          salvagedCategories.push(
+            normalizeSingleCategory(
+              cat,
+              tIdx,
+              cIdx,
+              kIdx,
+              header.code,
+              usedCatIds,
+            ),
+          );
+        } catch {
+          droppedCount += 1;
+        }
+      });
+
+      salvagedCourses.push({
+        ...header,
+        categories: salvagedCategories,
+      });
+      salvagedCourseCount += 1;
+    });
+
+    salvagedTerms.push({
+      id: termId,
+      name: termName,
+      courses: salvagedCourses,
+    });
+  });
+
+  if (salvagedTerms.length === 0 || (hadAnyRawCourses && salvagedCourseCount === 0)) {
+    return null;
+  }
+
+  const activeTermId =
+    typeof raw.activeTermId === 'string' &&
+    salvagedTerms.some((t) => t.id === raw.activeTermId)
+      ? raw.activeTermId
+      : salvagedTerms[0].id;
+
+  return {
+    state: {
+      version: CURRENT_SCHEMA_VERSION,
+      studentName,
+      lastUpdated,
+      activeTermId,
+      gradeScale,
+      terms: salvagedTerms,
+    },
+    droppedCount: Math.max(1, droppedCount),
+  };
+}
+
 export function createMemoryStorage() {
   const store = new Map();
   return {
+    get length() {
+      return store.size;
+    },
+    key(index) {
+      return Array.from(store.keys())[index] ?? null;
+    },
     getItem(key) {
       return store.has(String(key)) ? store.get(String(key)) : null;
     },
@@ -336,12 +610,109 @@ function cloneState(state) {
  */
 export class StorageService {
   constructor(options = {}) {
-    const hasExplicitStorage = Boolean(options) && Object.prototype.hasOwnProperty.call(options, 'storage');
+    const hasExplicitStorage =
+      Boolean(options) && Object.prototype.hasOwnProperty.call(options, 'storage');
     this.storageKey = options?.storageKey || STORAGE_KEY;
     this.storage = resolveStorage(options?.storage, hasExplicitStorage);
     this.cloudAdapter = null;
     this.cloudUnsubscribe = null;
     this.listeners = new Set();
+    this.schemaTooNew = false;
+    this.schemaTooNewError = null;
+    this.loadRecoveredFromCorruption = false;
+    this.loadRecoveryInfo = null;
+    this.lastRepairedSerialized = null;
+  }
+
+  getRecoveryNotice() {
+    return this.loadRecoveryInfo ? { ...this.loadRecoveryInfo } : null;
+  }
+
+  dismissRecoveryNotice() {
+    this.loadRecoveredFromCorruption = false;
+    this.loadRecoveryInfo = null;
+    this.lastRepairedSerialized = null;
+  }
+
+  resetClean() {
+    this.schemaTooNew = false;
+    this.schemaTooNewError = null;
+    this.loadRecoveredFromCorruption = false;
+    this.loadRecoveryInfo = null;
+    this.lastRepairedSerialized = null;
+    try {
+      if (typeof this.storage.removeItem === 'function') {
+        this.storage.removeItem(this.storageKey);
+      }
+    } catch {
+      // Ignore storage errors
+    }
+    const fresh = createInitialState();
+    this.saveLocalOnly(fresh);
+    this.notify(fresh);
+    return fresh;
+  }
+
+  backupCorruptPayload(raw) {
+    if (typeof raw !== 'string' || raw.length === 0) return null;
+    const prefix = `${this.storageKey}_corrupt_`;
+    const nowTs = Date.now();
+    try {
+      const existingEntries = [];
+      if (
+        typeof this.storage.length === 'number' &&
+        typeof this.storage.key === 'function'
+      ) {
+        for (let i = 0; i < this.storage.length; i += 1) {
+          const k = this.storage.key(i);
+          if (typeof k === 'string' && k.startsWith(prefix)) {
+            const rest = k.slice(prefix.length);
+            const m = /^(\d+)(?:_(\d+))?$/.exec(rest);
+            existingEntries.push({
+              key: k,
+              ts: m ? Number(m[1]) : 0,
+              seq: m && m[2] ? Number(m[2]) : 1,
+            });
+          }
+        }
+      }
+
+      existingEntries.sort((a, b) => a.ts - b.ts || a.seq - b.seq);
+
+      const maxExistingTs =
+        existingEntries.length > 0
+          ? existingEntries[existingEntries.length - 1].ts
+          : 0;
+      const effectiveTs = Math.max(nowTs, maxExistingTs);
+
+      let maxSeqForTs = 0;
+      for (const entry of existingEntries) {
+        if (entry.ts === effectiveTs && entry.seq > maxSeqForTs) {
+          maxSeqForTs = entry.seq;
+        }
+      }
+
+      let backupKey =
+        maxSeqForTs === 0
+          ? `${prefix}${effectiveTs}`
+          : `${prefix}${effectiveTs}_${maxSeqForTs + 1}`;
+      while (this.storage.getItem(backupKey) !== null) {
+        maxSeqForTs += 1;
+        backupKey = `${prefix}${effectiveTs}_${maxSeqForTs + 1}`;
+      }
+
+      if (typeof this.storage.removeItem === 'function') {
+        while (existingEntries.length >= MAX_CORRUPT_BACKUPS) {
+          const oldest = existingEntries.shift();
+          this.storage.removeItem(oldest.key);
+        }
+      }
+
+      this.storage.setItem(backupKey, raw);
+      return backupKey;
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -413,23 +784,70 @@ export class StorageService {
   }
 
   load() {
+    let raw = null;
     try {
-      const raw = this.storage.getItem(this.storageKey);
-      if (!raw) {
-        const initial = createInitialState();
-        this.saveLocalOnly(initial);
-        return initial;
-      }
-      const parsed = JSON.parse(raw);
-      return this.validateAndMigrate(parsed);
+      raw = this.storage.getItem(this.storageKey);
     } catch {
       const fallback = createInitialState();
       this.saveLocalOnly(fallback);
       return fallback;
     }
+
+    if (!raw) {
+      this.schemaTooNew = false;
+      this.schemaTooNewError = null;
+      this.loadRecoveredFromCorruption = false;
+      this.loadRecoveryInfo = null;
+      this.lastRepairedSerialized = null;
+      const initial = createInitialState();
+      this.saveLocalOnly(initial);
+      return initial;
+    }
+
+    let parsed = null;
+    try {
+      parsed = JSON.parse(raw);
+      const validated = this.validateAndMigrate(parsed);
+      this.schemaTooNew = false;
+      this.schemaTooNewError = null;
+      if (raw !== this.lastRepairedSerialized) {
+        this.loadRecoveredFromCorruption = false;
+        this.loadRecoveryInfo = null;
+        this.lastRepairedSerialized = null;
+      }
+      return validated;
+    } catch (err) {
+      if (isSchemaTooNewError(err)) {
+        // Never overwrite or strip newer-schema localStorage documents (#37)
+        this.schemaTooNew = true;
+        this.schemaTooNewError = err;
+        this.lastRepairedSerialized = null;
+        return createInitialState();
+      }
+
+      this.schemaTooNew = false;
+      this.schemaTooNewError = null;
+      const backupKey = this.backupCorruptPayload(raw);
+      const salvagedResult = parsed ? salvageTrackerState(parsed) : null;
+      const recovered = salvagedResult ? salvagedResult.state : createInitialState();
+      this.saveLocalOnly(recovered);
+      this.lastRepairedSerialized = JSON.stringify(recovered);
+      this.loadRecoveredFromCorruption = true;
+      this.loadRecoveryInfo = {
+        backupKey,
+        raw,
+        salvaged: Boolean(salvagedResult),
+        droppedCount: salvagedResult ? salvagedResult.droppedCount : 0,
+      };
+      return recovered;
+    }
   }
 
   saveLocalOnly(state) {
+    if (this.schemaTooNew) {
+      return;
+    }
+    this.lastRepairedSerialized = null;
     try {
       this.storage.setItem(this.storageKey, JSON.stringify(state));
     } catch {
@@ -442,6 +860,12 @@ export class StorageService {
    * safe to call inside React `<StrictMode>` state updaters (#14).
    */
   prepareForSave(state, { touchTimestamp = true, nowIso = new Date().toISOString() } = {}) {
+    if (this.schemaTooNew) {
+      throw (
+        this.schemaTooNewError ||
+        new SchemaTooNewError(CURRENT_SCHEMA_VERSION + 1, CURRENT_SCHEMA_VERSION)
+      );
+    }
     const cloned = this.validateAndMigrate(state);
     return {
       ...cloned,

@@ -219,4 +219,90 @@ describe('StorageService & CloudSyncAdapter (storage.js)', () => {
     detachSingleton();
     expect(storageService.cloudAdapter).toBeNull();
   });
+
+  it('backs up raw corrupt payloads to grade_tracker_v1_corrupt_<ts> (capped at 2) and salvages valid sibling courses (#36)', async () => {
+    const { MAX_CORRUPT_BACKUPS } = await import('../../src/services/storage.js');
+    const mem = createMemoryStorage();
+    const svc = new StorageService({ storage: mem });
+
+    const partialCorrupt = createInitialState();
+    partialCorrupt.studentName = 'Alex Custom';
+    // Corrupt course 0 (`units: 101` > 100), keep sibling courses MATH101 & CS101 valid
+    partialCorrupt.terms[0].courses[0].units = 101;
+    // Also corrupt one assessment row inside MATH101 (`weight: -5`) while keeping remaining rows valid
+    partialCorrupt.terms[0].courses[1].categories.unshift({
+      id: 'bad-cat',
+      name: 'Invalid Row',
+      weight: -5,
+      grade: 80,
+    });
+    const rawCorruptJson = JSON.stringify(partialCorrupt);
+    mem.setItem(STORAGE_KEY, rawCorruptJson);
+
+    const loaded = svc.load();
+    expect(loaded.studentName).toBe('Alex Custom');
+    expect(loaded.terms[0].courses.map((c) => c.code)).toEqual(['MATH101', 'CS101']);
+    expect(
+      loaded.terms[0].courses[0].categories.some((cat) => cat.name === 'Invalid Row'),
+    ).toBe(false);
+    expect(loaded.terms[0].courses[0].categories.length).toBeGreaterThan(0);
+
+    const notice = svc.getRecoveryNotice();
+    expect(notice).toBeTruthy();
+    expect(notice.salvaged).toBe(true);
+    expect(notice.droppedCount).toBe(2);
+    expect(notice.backupKey).toMatch(/^grade_tracker_v1_corrupt_\d+/);
+    expect(mem.getItem(notice.backupKey)).toBe(rawCorruptJson);
+
+    // Verify rolling backup cap (at most MAX_CORRUPT_BACKUPS = 2 kept) even under identical millisecond timestamps
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(1700000000000);
+    try {
+      for (let i = 0; i < 4; i += 1) {
+        mem.setItem(STORAGE_KEY, `corrupt-payload-${i}`);
+        svc.load();
+      }
+    } finally {
+      nowSpy.mockRestore();
+    }
+    const backupKeys = [];
+    for (let i = 0; i < mem.length; i += 1) {
+      const k = mem.key(i);
+      if (k && k.startsWith(`${STORAGE_KEY}_corrupt_`)) {
+        backupKeys.push(k);
+      }
+    }
+    expect(backupKeys.length).toBeLessThanOrEqual(MAX_CORRUPT_BACKUPS);
+    const savedBackups = backupKeys.map((k) => mem.getItem(k));
+    expect(savedBackups).toContain('corrupt-payload-2');
+    expect(savedBackups).toContain('corrupt-payload-3');
+  });
+
+  it('throws SchemaTooNewError on future schema versions and refuses to overwrite newer local documents (#37)', async () => {
+    const { SchemaTooNewError } = await import('../../src/services/storage.js');
+    const futureDoc = {
+      ...createInitialState(),
+      version: 2,
+      studentName: 'Future V2 User',
+      futureSubItemsFeature: [{ dropLowest: 2 }],
+    };
+
+    expect(() => validateTrackerState(futureDoc)).toThrow(SchemaTooNewError);
+
+    const mem = createMemoryStorage();
+    const rawFuture = JSON.stringify(futureDoc);
+    mem.setItem(STORAGE_KEY, rawFuture);
+
+    const svc = new StorageService({ storage: mem });
+    svc.load();
+    expect(svc.schemaTooNew).toBe(true);
+    // Must NEVER overwrite or strip the v2 document in localStorage!
+    expect(mem.getItem(STORAGE_KEY)).toBe(rawFuture);
+    expect(() => svc.save(createInitialState())).toThrow(SchemaTooNewError);
+    expect(mem.getItem(STORAGE_KEY)).toBe(rawFuture);
+
+    // Explicit resetClean() (e.g., Sign Out / Delete Cloud Data) unlocks schemaTooNew cleanly
+    svc.resetClean();
+    expect(svc.schemaTooNew).toBe(false);
+    expect(() => svc.save(createInitialState())).not.toThrow();
+  });
 });

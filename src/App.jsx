@@ -166,14 +166,19 @@ function preserveCurrentUiState(targetSnapshot, currentState) {
 }
 
 export default function App() {
-  const [doc, setDoc] = useState(() => ({
-    current: storageService.load(),
-    past: [],
-    future: [],
-    localSaveSeq: 0,
-    cloudSaveSeq: 0,
-  }));
+  const [doc, setDoc] = useState(() => {
+    const current = storageService.load();
+    return {
+      current,
+      recoveryNotice: storageService.getRecoveryNotice(),
+      past: [],
+      future: [],
+      localSaveSeq: 0,
+      cloudSaveSeq: 0,
+    };
+  });
   const state = doc.current;
+  const recoveryNotice = doc.recoveryNotice;
   const stateRef = useRef(state);
   stateRef.current = state;
   const lastCoalesceRef = useRef({ key: null, time: 0 });
@@ -209,6 +214,30 @@ export default function App() {
     setToast({ text });
   }, []);
 
+  function handleDownloadCorruptBackup() {
+    if (!recoveryNotice?.raw) return;
+    try {
+      const blob = new Blob([recoveryNotice.raw], {
+        type: 'application/json;charset=utf-8',
+      });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `grade-tracker-corrupt-backup-${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 0);
+    } catch {
+      showToast('Could not download backup file.');
+    }
+  }
+
+  function handleDismissRecoveryNotice() {
+    storageService.dismissRecoveryNotice();
+    setDoc((prev) => ({ ...prev, recoveryNotice: null }));
+  }
+
   useEffect(() => {
     if (!toast) return undefined;
     const t = setTimeout(() => setToast(null), 3200);
@@ -224,6 +253,7 @@ export default function App() {
       }
       setDoc((prev) => ({
         current: remoteState,
+        recoveryNotice: storageService.getRecoveryNotice(),
         past: [],
         future: [],
         localSaveSeq: prev.localSaveSeq || 0,
@@ -355,6 +385,9 @@ export default function App() {
   }, [showToast]);
 
   const isSharedReadOnly = Boolean(sharedState);
+  const schemaUpdateRequired = Boolean(
+    storageService.schemaTooNew || syncSnapshot.schemaTooNew,
+  );
   const readOnlyMode = isSharedReadOnly
     ? liveShareTokenView
       ? 'live-share'
@@ -362,7 +395,7 @@ export default function App() {
     : null;
   const simMode = sandboxState !== null;
   // In What-If Sandbox mode, allow testing edits even on a shared view (in memory only)
-  const readOnly = isSharedReadOnly && !simMode;
+  const readOnly = (isSharedReadOnly || schemaUpdateRequired) && !simMode;
   const baseState = sharedState || state;
   const activeState = sandboxState || baseState;
 
@@ -417,6 +450,18 @@ export default function App() {
         });
         return;
       }
+      if (schemaUpdateRequired) {
+        setDoc((prev) => {
+          const nextCurrent =
+            typeof updater === 'function' ? updater(prev.current) : updater;
+          if (nextCurrent === prev.current) return prev;
+          return {
+            ...prev,
+            current: nextCurrent,
+          };
+        });
+        return;
+      }
       const nowIso = new Date().toISOString();
       setDoc((prev) => {
         const nextCurrent =
@@ -439,7 +484,7 @@ export default function App() {
         };
       });
     },
-    [simMode, safePrepareForSave],
+    [simMode, schemaUpdateRequired, safePrepareForSave],
   );
 
   /**
@@ -456,6 +501,7 @@ export default function App() {
         });
         return;
       }
+      if (schemaUpdateRequired) return;
 
       const now = Date.now();
       const nowIso = new Date(now).toISOString();
@@ -492,6 +538,7 @@ export default function App() {
           nextPast = [...prev.past.slice(-(MAX_HISTORY - 1)), prev.current];
         }
         return {
+          ...prev,
           current: prepared,
           past: nextPast,
           future: [],
@@ -500,11 +547,11 @@ export default function App() {
         };
       });
     },
-    [simMode, safePrepareForSave],
+    [simMode, schemaUpdateRequired, safePrepareForSave],
   );
 
   const handleUndo = useCallback(() => {
-    if (isSharedReadOnly || simMode) return;
+    if (isSharedReadOnly || schemaUpdateRequired || simMode) return;
     lastCoalesceRef.current = { key: null, time: 0 };
     const nowIso = new Date().toISOString();
     setDoc((prev) => {
@@ -519,6 +566,7 @@ export default function App() {
       });
       if (!restored) return prev;
       return {
+        ...prev,
         current: restored,
         past: prev.past.slice(0, -1),
         future: [prev.current, ...prev.future.slice(0, MAX_HISTORY - 1)],
@@ -527,10 +575,10 @@ export default function App() {
       };
     });
     showToast('Undid last change.');
-  }, [isSharedReadOnly, simMode, showToast, safePrepareForSave]);
+  }, [isSharedReadOnly, schemaUpdateRequired, simMode, showToast, safePrepareForSave]);
 
   const handleRedo = useCallback(() => {
-    if (isSharedReadOnly || simMode) return;
+    if (isSharedReadOnly || schemaUpdateRequired || simMode) return;
     lastCoalesceRef.current = { key: null, time: 0 };
     const nowIso = new Date().toISOString();
     setDoc((prev) => {
@@ -543,6 +591,7 @@ export default function App() {
       });
       if (!restored) return prev;
       return {
+        ...prev,
         current: restored,
         past: [...prev.past.slice(-(MAX_HISTORY - 1)), prev.current],
         future: remainingFuture,
@@ -551,11 +600,11 @@ export default function App() {
       };
     });
     showToast('Redid change.');
-  }, [isSharedReadOnly, simMode, showToast, safePrepareForSave]);
+  }, [isSharedReadOnly, schemaUpdateRequired, simMode, showToast, safePrepareForSave]);
 
   // Global keyboard shortcuts: Ctrl/Cmd+Z (Undo) and Ctrl/Cmd+Shift+Z or Ctrl+Y (Redo)
   useEffect(() => {
-    if (isSharedReadOnly || simMode) return undefined;
+    if (isSharedReadOnly || schemaUpdateRequired || simMode) return undefined;
     function onKeyDown(e) {
       if (!(e.metaKey || e.ctrlKey) || e.altKey) return;
       const tag = e.target?.tagName;
@@ -577,7 +626,15 @@ export default function App() {
     }
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [isSharedReadOnly, simMode, doc.past.length, doc.future.length, handleUndo, handleRedo]);
+  }, [
+    isSharedReadOnly,
+    schemaUpdateRequired,
+    simMode,
+    doc.past.length,
+    doc.future.length,
+    handleUndo,
+    handleRedo,
+  ]);
 
   const activeTerm =
     activeState.terms.find((t) => t.id === activeState.activeTermId) ||
@@ -639,27 +696,29 @@ export default function App() {
   }
 
   function applySaveSharedCopyLocally() {
-    if (!sharedState) return;
+    if (!sharedState || schemaUpdateRequired) return;
+    const nowIso = new Date().toISOString();
+    const prepared = safePrepareForSave(sharedState, {
+      touchTimestamp: true,
+      nowIso,
+    });
+    if (!prepared) {
+      showToast('Could not save shared courses right now.');
+      return;
+    }
     urlRequestSeqRef.current += 1;
     setPendingDelete(null);
     setShowScaleModal(false);
     setShowShareModal(false);
     setSandboxState(null);
-    const nowIso = new Date().toISOString();
-    setDoc((prev) => {
-      const prepared = safePrepareForSave(sharedState, {
-        touchTimestamp: true,
-        nowIso,
-      });
-      if (!prepared) return prev;
-      return {
-        current: prepared,
-        past: [...prev.past.slice(-(MAX_HISTORY - 1)), prev.current],
-        future: [],
-        localSaveSeq: (prev.localSaveSeq || 0) + 1,
-        cloudSaveSeq: (prev.cloudSaveSeq || 0) + 1,
-      };
-    });
+    setDoc((prev) => ({
+      ...prev,
+      current: prepared,
+      past: [...prev.past.slice(-(MAX_HISTORY - 1)), prev.current],
+      future: [],
+      localSaveSeq: (prev.localSaveSeq || 0) + 1,
+      cloudSaveSeq: (prev.cloudSaveSeq || 0) + 1,
+    }));
     clearShareParamsFromCurrentUrl(window);
     clearLiveViewFromUrl(window);
     setLiveShareTokenView(null);
@@ -668,7 +727,7 @@ export default function App() {
   }
 
   function handleSaveSharedCopyLocally() {
-    if (!sharedState) return;
+    if (!sharedState || schemaUpdateRequired) return;
     const hasExistingCourses = state.terms.some(
       (t) => (t.courses?.length || 0) > 0,
     );
@@ -720,8 +779,10 @@ export default function App() {
     }
     lastCoalesceRef.current = { key: null, time: 0 };
     setSandboxState(null);
+    const loaded = storageService.load();
     setDoc((prev) => ({
-      current: storageService.load(),
+      current: loaded,
+      recoveryNotice: storageService.getRecoveryNotice(),
       past: [],
       future: [],
       localSaveSeq: prev.localSaveSeq || 0,
@@ -739,8 +800,10 @@ export default function App() {
     }
     lastCoalesceRef.current = { key: null, time: 0 };
     setSandboxState(null);
+    const loaded = storageService.load();
     setDoc((prev) => ({
-      current: storageService.load(),
+      current: loaded,
+      recoveryNotice: storageService.getRecoveryNotice(),
       past: [],
       future: [],
       localSaveSeq: prev.localSaveSeq || 0,
@@ -1071,6 +1134,70 @@ export default function App() {
 
   return (
     <div className="app-root">
+      {/* Newer Schema Version Protection Banner (#37) */}
+      {schemaUpdateRequired && (
+        <div className="mode-banner danger-banner" role="alert">
+          <div className="mode-banner-inner">
+            <span>
+              <strong>App Update Required</strong> — Your saved courses use a
+              newer Grade Tracker format. Reload this page to load the latest
+              version safely (editing and cloud pushes are paused to protect
+              your data).
+            </span>
+            <div className="mode-banner-actions">
+              <button
+                type="button"
+                className="btn btn-ghost-light"
+                onClick={() => window.location.reload()}
+              >
+                Reload Page
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Corrupt-Load Salvage & Raw Backup Notice (#36) */}
+      {recoveryNotice && (
+        <div className="mode-banner recovery-banner" role="alert">
+          <div className="mode-banner-inner">
+            <span>
+              {recoveryNotice.salvaged ? (
+                <>
+                  <strong>Recovered Saved Courses</strong> — Skipped{' '}
+                  {recoveryNotice.droppedCount || 1} invalid item
+                  {(recoveryNotice.droppedCount || 1) === 1 ? '' : 's'} while
+                  preserving your valid courses. A raw backup copy was saved
+                  locally.
+                </>
+              ) : (
+                <>
+                  <strong>Saved Data Reset</strong> — Stored browser data was
+                  unreadable, so a raw backup copy was preserved before starting
+                  fresh.
+                </>
+              )}
+            </span>
+            <div className="mode-banner-actions">
+              <button
+                type="button"
+                className="btn btn-ghost-light"
+                onClick={handleDownloadCorruptBackup}
+              >
+                Download Backup (.json)
+              </button>
+              <button
+                type="button"
+                className="btn btn-ghost-light"
+                onClick={handleDismissRecoveryNotice}
+              >
+                Dismiss
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Shared Snapshot or Live Shared View Banner */}
       {isSharedReadOnly && (
         <div className="mode-banner" role="status">
@@ -1100,14 +1227,16 @@ export default function App() {
                   {liveRefreshing ? 'Refreshing…' : '↻ Refresh'}
                 </button>
               )}
-              <button
-                id="save-shared-copy-btn"
-                type="button"
-                className="btn btn-ghost-light"
-                onClick={handleSaveSharedCopyLocally}
-              >
-                Save Copy Locally
-              </button>
+              {!schemaUpdateRequired && (
+                <button
+                  id="save-shared-copy-btn"
+                  type="button"
+                  className="btn btn-ghost-light"
+                  onClick={handleSaveSharedCopyLocally}
+                >
+                  Save Copy Locally
+                </button>
+              )}
               <button
                 id="exit-shared-view-btn"
                 type="button"
@@ -1165,8 +1294,8 @@ export default function App() {
         stats={stats}
         hasMultipleTerms={activeState.terms.length > 1}
         activeTermName={activeTerm?.name || 'Term'}
-        canUndo={!simMode && doc.past.length > 0}
-        canRedo={!simMode && doc.future.length > 0}
+        canUndo={!readOnly && !simMode && doc.past.length > 0}
+        canRedo={!readOnly && !simMode && doc.future.length > 0}
         onUndo={handleUndo}
         onRedo={handleRedo}
         onChangeName={(name) => {
@@ -1419,8 +1548,10 @@ export default function App() {
               );
               lastCoalesceRef.current = { key: null, time: 0 };
               setSandboxState(null);
+              const loaded = storageService.load();
               setDoc((prev) => ({
-                current: storageService.load(),
+                current: loaded,
+                recoveryNotice: storageService.getRecoveryNotice(),
                 past: [],
                 future: [],
                 localSaveSeq: prev.localSaveSeq || 0,
