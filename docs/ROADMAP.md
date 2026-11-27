@@ -46,6 +46,8 @@ This document tracks shipped milestones, upcoming features, and key technical de
   - Shared-computer safety: Firestore uses stateless `firebase/firestore/lite` (zero IndexedDB grade remnants on disk; Firebase Auth stores only the active OAuth session token in IndexedDB until Sign Out), Sign Out flushes pending edits before clearing local `grade_tracker_v1` + Undo/Redo history across tabs, involuntary auth loss (`onAuthStateChanged(null)` while dirty) preserves `grade_tracker_v1_unsynced_backup` for next sign-in recovery, and `lastSyncedUid` prevents accidental cross-account uploads.
 - **Unified Sharing (`#view=<token>` Live Link + `#share=...` Snapshot)**:
   - Signed-in users can enable, rotate, or turn off a 192-bit `base64url` **Live Auto-Updating Link** (`#view=<token>` with `<meta name="referrer" content="no-referrer" />`) backed by `shares/{token}` (storing only opaque `ownerUid`, `stateJson`, and `updatedAt`) and symmetrically bound 1-to-1 to `users/{uid}.shareToken` via `getAfter(...)` and `!existsAfter(...)` on both `users/{uid}` and `shares/{token}` in a single atomic `writeBatch` (zero orphan share docs and zero dangling `shareToken` pointers), alongside one-time compressed `#share=` snapshots.
+- **Privacy-First Anonymized Usage Analytics (`src/services/analytics.js`, `#104`)**:
+  - Optional cookie-free Umami Cloud integration (`VITE_UMAMI_WEBSITE_ID`) measuring Guest vs. Signed-In audience splits, once-per-session active engagement (`tracker_engaged`), Cloud Sync conversion, conflict frequency, sharing virality, and feature adoption using a frozen enum-only event schema and mandatory pathname-only `beforeSend` URL/referrer sanitization (`?analytics=off` / `?analytics=on` owner browser exclusion).
 
 ---
 

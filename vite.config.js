@@ -9,8 +9,8 @@ const devHmrCspPlugin = {
   transformIndexHtml(html) {
     return html
       .replace(
-        "script-src 'self' https://apis.google.com;",
-        "script-src 'self' 'unsafe-inline' https://apis.google.com;",
+        "script-src 'self'",
+        "script-src 'self' 'unsafe-inline'",
       )
       .replace(
         "connect-src 'self'",

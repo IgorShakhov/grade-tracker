@@ -418,6 +418,7 @@ export class CloudSyncManager {
     this.localMutationSeq = 0;
     this.reconcilingUid = null;
     this.reconcilePromise = null;
+    this.lastSignInKind = null;
 
     // Clean up any obsolete GitHub token sync entry from earlier milestone versions
     try {
@@ -550,6 +551,7 @@ export class CloudSyncManager {
       dirty: this.meta.dirty,
       error: this.error,
       schemaTooNew: this.isSchemaBlocked(),
+      lastSignInKind: this.lastSignInKind,
       conflict: this.conflict
         ? {
             ...this.conflict,
@@ -946,6 +948,7 @@ export class CloudSyncManager {
       this.conflict = null;
       this.error = null;
       this.schemaTooNew = false;
+      this.lastSignInKind = null;
       this.status = 'disconnected';
       if (wasSignedIn) {
         if (shouldBackupUnsynced && previousUid && stateForBackup) {
@@ -1063,6 +1066,7 @@ export class CloudSyncManager {
         Boolean(lastSyncedUid) && lastSyncedUid !== uid;
 
       if (snap.exists()) {
+        this.lastSignInKind = 'returning';
         const data = snap.data() || {};
         const remoteRev =
           typeof data.rev === 'number' && Number.isInteger(data.rev) ? data.rev : 1;
@@ -1177,6 +1181,7 @@ export class CloudSyncManager {
 
       // Cloud document `users/{uid}` does NOT exist!
       if (isDifferentPreviousOwner) {
+        this.lastSignInKind = 'first_sync';
         // Never auto-upload another user's leftover localStorage into a brand-new account (`E2`)
         this.status = 'conflict';
         this.conflict = {
@@ -1191,6 +1196,7 @@ export class CloudSyncManager {
 
       // Same account previously synced (`lastSyncedRev > 0`), meaning cloud data was deleted on another device (#15)
       if (lastSyncedUid === uid && (lastSyncedRev || 0) > 0) {
+        this.lastSignInKind = 'returning';
         this.status = 'conflict';
         this.conflict = {
           reason: 'remote-deleted',
@@ -1202,6 +1208,7 @@ export class CloudSyncManager {
         return;
       }
 
+      this.lastSignInKind = hadRecoveredBackup ? 'returning' : 'first_sync';
       // First-time cloud setup for this user -> create `users/{uid}` at `rev: 1`.
       // Leave `lastSyncedUid` unset until `pushStateToCloud` commits so failed initial pushes
       // never strip `hasUnreconciledCustomLocalCourses()` protection.
