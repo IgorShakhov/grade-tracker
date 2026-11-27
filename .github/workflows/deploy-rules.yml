@@ -8,6 +8,7 @@ on:
       - 'firestore.rules'
       - 'firebase.json'
       - '.firebaserc'
+      - 'scripts/deploy-firestore-rules.mjs'
       - '.github/workflows/deploy-rules.yml'
   workflow_dispatch:
 
@@ -76,21 +77,25 @@ jobs:
             echo "mode=sa" >> "$GITHUB_OUTPUT"
           else
             echo "mode=unconfigured" >> "$GITHUB_OUTPUT"
-            echo "::notice::Firestore rules deploy skipped — configure GCP_WIF_PROVIDER + GCP_RULES_DEPLOYER_SA repository variables (or FIREBASE_SERVICE_ACCOUNT secret) per README.md to enable automated rules deploys."
+            echo "::notice::Firestore rules deploy skipped — configure GCP_WIF_PROVIDER + GCP_RULES_DEPLOYER_SA variables (or FIREBASE_SERVICE_ACCOUNT secret) per README.md to enable automated rules deploys."
           fi
 
       - name: Authenticate to Google Cloud via Workload Identity Federation
+        id: auth-wif
         if: steps.creds.outputs.mode == 'wif'
         uses: google-github-actions/auth@v3
         with:
           workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
           service_account: ${{ vars.GCP_RULES_DEPLOYER_SA }}
+          token_format: 'access_token'
 
       - name: Authenticate to Google Cloud via Service Account JSON
+        id: auth-sa
         if: steps.creds.outputs.mode == 'sa'
         uses: google-github-actions/auth@v3
         with:
           credentials_json: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          token_format: 'access_token'
 
       - name: Setup Node.js
         if: steps.creds.outputs.mode != 'unconfigured'
@@ -100,4 +105,6 @@ jobs:
 
       - name: Deploy Firestore Security Rules
         if: steps.creds.outputs.mode != 'unconfigured'
-        run: npx --yes firebase-tools@15.37.0 deploy --only firestore:rules --project grade-tracker-sync --non-interactive
+        env:
+          GOOGLE_OAUTH_ACCESS_TOKEN: ${{ steps.auth-wif.outputs.access_token || steps.auth-sa.outputs.access_token }}
+        run: node scripts/deploy-firestore-rules.mjs

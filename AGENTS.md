@@ -49,6 +49,8 @@ Read this file and [`docs/ROADMAP.md`](docs/ROADMAP.md) first before modifying t
 │   │   └── SyncModals.jsx            # CloudSyncModal (Google Sign-In, Sync Now, Sign Out, Delete Cloud Data) & SyncConflictModal
 │   └── styles/
 │       └── index.css                 # Complete Vanilla CSS design system, WCAG 2.2 AA contrast tokens, @media print
+├── scripts/
+│   └── deploy-firestore-rules.mjs    # Least-privilege Firebase Rules v1 REST deployer (roles/firebaserules.admin only)
 ├── tests/
 │   ├── rules/
 │   │   └── firestore.rules.test.mjs  # Real Java Cloud Firestore Emulator REST security rules test suite
