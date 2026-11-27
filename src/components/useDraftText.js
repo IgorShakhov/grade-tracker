@@ -13,11 +13,20 @@ export function useDraftText(committedValue, { onCommit, fallbackOnEmpty }) {
   useEffect(() => {
     if (committedValue !== lastCommittedByInputRef.current) {
       lastCommittedByInputRef.current = committedValue;
+      if (focusInitialRef.current !== null) {
+        focusInitialRef.current = committedValue;
+      }
       setDraft(null);
     }
   }, [committedValue]);
 
   const value = draft !== null ? draft : committedValue;
+
+  function resolveFallback(initialOnFocus, currentCommitted) {
+    return typeof fallbackOnEmpty === 'function'
+      ? fallbackOnEmpty(initialOnFocus, currentCommitted)
+      : fallbackOnEmpty;
+  }
 
   function onFocus() {
     focusInitialRef.current = committedValue;
@@ -33,22 +42,23 @@ export function useDraftText(committedValue, { onCommit, fallbackOnEmpty }) {
     }
     setDraft(raw);
     const trimmed = raw.trim();
-    if (trimmed !== '') {
-      lastCommittedByInputRef.current = trimmed;
-      if (trimmed !== committedValue) {
-        onCommit(trimmed);
-      }
+    const target =
+      trimmed !== ''
+        ? trimmed
+        : resolveFallback(focusInitialRef.current, committedValue);
+    lastCommittedByInputRef.current = target;
+    if (target !== committedValue) {
+      onCommit(target);
     }
   }
 
   function onBlur() {
     const raw = draft !== null ? draft : committedValue;
     const trimmed = raw.trim();
-    const fallback =
-      typeof fallbackOnEmpty === 'function'
-        ? fallbackOnEmpty(focusInitialRef.current, committedValue)
-        : fallbackOnEmpty;
-    const resolved = trimmed !== '' ? trimmed : fallback;
+    const resolved =
+      trimmed !== ''
+        ? trimmed
+        : resolveFallback(focusInitialRef.current, committedValue);
     focusInitialRef.current = null;
     setDraft(null);
     lastCommittedByInputRef.current = resolved;

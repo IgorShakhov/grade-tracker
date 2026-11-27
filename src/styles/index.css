@@ -908,6 +908,13 @@ body {
   background: hsla(38, 95%, 97%, 0.9);
 }
 
+.cell-input.cell-warn,
+.cell-input.cell-warn:hover:not(:disabled) {
+  border-color: hsl(35, 84%, 42%);
+  background: hsl(42, 95%, 95%);
+  color: hsl(28, 80%, 26%);
+}
+
 .contrib-cell {
   text-align: right;
   font-family: var(--font-mono);
@@ -1430,22 +1437,6 @@ body {
   display: inline-flex;
   align-items: center;
   gap: 0.7rem;
-}
-
-.toast-undo-btn {
-  background: hsla(0, 0%, 100%, 0.16);
-  border: 1px solid hsla(0, 0%, 100%, 0.32);
-  color: #fff;
-  font-family: var(--font-sans);
-  font-size: 0.76rem;
-  font-weight: 700;
-  padding: 0.2rem 0.55rem;
-  border-radius: var(--radius-xs);
-  cursor: pointer;
-}
-
-.toast-undo-btn:hover {
-  background: hsla(0, 0%, 100%, 0.28);
 }
 
 /* Cloud Sync Status & Modal Form */

@@ -13,7 +13,7 @@ function downloadRawLocalStorageBackup() {
     document.body.appendChild(link);
     link.click();
     link.remove();
-    URL.revokeObjectURL(url);
+    setTimeout(() => URL.revokeObjectURL(url), 0);
   } catch (err) {
     console.error('Could not export local backup:', err);
   }

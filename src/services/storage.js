@@ -449,12 +449,19 @@ export class StorageService {
     };
   }
 
-  save(state, { touchTimestamp = true, notifyListeners = true } = {}) {
+  save(
+    state,
+    { touchTimestamp = true, notifyListeners = true, syncToCloud = true } = {},
+  ) {
     const nextState = this.prepareForSave(state, { touchTimestamp });
 
     this.saveLocalOnly(nextState);
 
-    if (this.cloudAdapter && typeof this.cloudAdapter.save === 'function') {
+    if (
+      syncToCloud &&
+      this.cloudAdapter &&
+      typeof this.cloudAdapter.save === 'function'
+    ) {
       const adapter = this.cloudAdapter;
       const cloudSnapshot = cloneState(nextState);
       Promise.resolve()
