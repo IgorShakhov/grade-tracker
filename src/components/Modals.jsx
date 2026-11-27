@@ -27,8 +27,24 @@ export function ShareModal({
     }
   }
 
+  function handleDismiss() {
+    if (busy !== null) return;
+    onClose();
+  }
+
+  useEffect(() => {
+    function handleKeyDown(e) {
+      if (e.key === 'Escape' && busy === null) {
+        e.preventDefault();
+        onClose();
+      }
+    }
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [busy, onClose]);
+
   return (
-    <div className="modal-backdrop" onClick={onClose}>
+    <div className="modal-backdrop" onClick={handleDismiss}>
       <div
         className="modal-panel"
         role="dialog"
@@ -41,7 +57,8 @@ export function ShareModal({
           <button
             type="button"
             className="modal-close"
-            onClick={onClose}
+            disabled={busy !== null}
+            onClick={handleDismiss}
             aria-label="Close share dialog"
           >
             ×
@@ -210,6 +227,17 @@ export function ScaleEditorModal({ gradeScale, onSaveScale, onClose }) {
     })),
   );
   const [error, setError] = useState('');
+
+  useEffect(() => {
+    function handleKeyDown(e) {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        onClose();
+      }
+    }
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [onClose]);
 
   function updateRow(idx, field, val) {
     setRows((prev) => prev.map((r, i) => (i === idx ? { ...r, [field]: val } : r)));

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { formatLastUpdated } from '../domain/calculations.js';
 
 function GoogleMark() {
@@ -46,6 +46,22 @@ export function CloudSyncModal({
   const user = syncSnapshot?.user;
   const isSignedIn = Boolean(user);
 
+  function handleDismiss() {
+    if (busyAction !== null) return;
+    onClose();
+  }
+
+  useEffect(() => {
+    function handleKeyDown(e) {
+      if (e.key === 'Escape' && busyAction === null) {
+        e.preventDefault();
+        onClose();
+      }
+    }
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [busyAction, onClose]);
+
   async function runAction(label, fn) {
     setLocalError('');
     setBusyAction(label);
@@ -72,7 +88,7 @@ export function CloudSyncModal({
   }
 
   return (
-    <div className="modal-backdrop" onClick={onClose}>
+    <div className="modal-backdrop" onClick={handleDismiss}>
       <div
         className="modal-panel"
         style={{ maxWidth: '460px' }}
@@ -88,7 +104,8 @@ export function CloudSyncModal({
           <button
             type="button"
             className="modal-close"
-            onClick={onClose}
+            disabled={busyAction !== null}
+            onClick={handleDismiss}
             aria-label="Close account dialog"
           >
             ×
@@ -270,7 +287,12 @@ export function CloudSyncModal({
             className="modal-footer-btns"
             style={{ justifyContent: 'flex-end', marginTop: '0.95rem' }}
           >
-            <button type="button" className="btn btn-sm" onClick={onClose}>
+            <button
+              type="button"
+              className="btn btn-sm"
+              disabled={busyAction !== null}
+              onClick={handleDismiss}
+            >
               Close
             </button>
           </div>
@@ -314,6 +336,17 @@ export function SyncConflictModal({
     if (busyChoice !== null) return;
     onClose();
   }
+
+  useEffect(() => {
+    function handleKeyDown(e) {
+      if (e.key === 'Escape' && busyChoice === null) {
+        e.preventDefault();
+        onClose();
+      }
+    }
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [busyChoice, onClose]);
 
   const titleText = isAccountSwitch
     ? 'Different Google Account Detected'

@@ -472,6 +472,76 @@ describe('Grade Tracker React Application (M1 + M1.1 + Firebase Cloud Sync)', ()
       'Shared Friend V2',
     );
   });
+
+  it('closes CloudSyncModal, ShareModal, ScaleEditorModal, and SyncConflictModal on Escape key (#17)', async () => {
+    const { cloudSyncManager } = await import('../../src/services/cloudSync.js');
+    render(<App />);
+
+    // 1. CloudSyncModal
+    fireEvent.click(screen.getByRole('button', { name: /^Sign In$/i }));
+    expect(
+      screen.getByRole('dialog', { name: /Sign In to Sync/i }),
+    ).toBeInTheDocument();
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(
+      screen.queryByRole('dialog', { name: /Sign In to Sync/i }),
+    ).not.toBeInTheDocument();
+
+    // 2. ShareModal
+    fireEvent.click(screen.getByRole('button', { name: /^Share$/i }));
+    expect(
+      await screen.findByRole('dialog', { name: /Share Read-Only View/i }),
+    ).toBeInTheDocument();
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(
+      screen.queryByRole('dialog', { name: /Share Read-Only View/i }),
+    ).not.toBeInTheDocument();
+
+    // 3. ScaleEditorModal
+    fireEvent.click(screen.getByRole('button', { name: /Customize/i }));
+    expect(
+      screen.getByRole('dialog', { name: /Customize Grading Scale/i }),
+    ).toBeInTheDocument();
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(
+      screen.queryByRole('dialog', { name: /Customize Grading Scale/i }),
+    ).not.toBeInTheDocument();
+
+    // 4. SyncConflictModal
+    try {
+      act(() => {
+        cloudSyncManager.currentUser = { uid: 'u-esc', email: 'e@example.com' };
+        cloudSyncManager.status = 'conflict';
+        cloudSyncManager.conflict = {
+          reason: 'remote-deleted',
+          remoteState: null,
+          remoteRev: 0,
+          remoteShareToken: null,
+        };
+        cloudSyncManager.emit();
+      });
+      expect(
+        await screen.findByRole('alertdialog', {
+          name: /Cloud Data Deleted on Another Device/i,
+        }),
+      ).toBeInTheDocument();
+      fireEvent.keyDown(window, { key: 'Escape' });
+      expect(
+        screen.queryByRole('alertdialog', {
+          name: /Cloud Data Deleted on Another Device/i,
+        }),
+      ).not.toBeInTheDocument();
+    } finally {
+      act(() => {
+        cloudSyncManager.currentUser = null;
+        cloudSyncManager.conflict = null;
+        cloudSyncManager.status = 'disconnected';
+        cloudSyncManager.clearMeta();
+        cloudSyncManager.emit();
+      });
+    }
+  });
 });
+
 
 

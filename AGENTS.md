@@ -67,9 +67,10 @@ Read this file and [`docs/ROADMAP.md`](docs/ROADMAP.md) first before modifying t
    - Courses with `passFail: true` display `P` / `NP` / `P/F` and are excluded from GPA denominators while still counting toward enrolled credits and weighted percentage averages.
 
 2. **Atomic State + Undo/Redo (`src/App.jsx`)**:
-   - `App.jsx` stores `{ current, past, future }` in a single `doc` state object so `commitState`, `handleUndo`, and `handleRedo` remain 100% pure under React 19 `<StrictMode>`.
+   - `App.jsx` stores `{ current, past, future, localSaveSeq, needsPersist }` in a single `doc` state object so `commitState`, `updateCurrentWithoutHistory`, `handleUndo`, and `handleRedo` remain 100% pure under React 19 `<StrictMode>` (`storageService.prepareForSave(...)` inside updaters, persisted once via `useEffect`).
    - Rapid consecutive character edits sharing a `coalesceKey` within `700ms` coalesce into a single Undo step; structural mutations and deletions never coalesce.
    - UI-only toggles (`activeTermId` tab switch, `collapsed` fold state) use `updateCurrentWithoutHistory` so folding cards does not pollute the Undo stack or touch `lastUpdated`.
+   - Remote cloud pulls and cross-tab storage resets clear stale Undo/Redo stacks (`past: [], future: []`) so Undo cannot overwrite another device's edits without conflict detection.
 
 3. **What-If Simulator Sandbox Isolation (`src/App.jsx`)**:
    - Entering What-If Simulator clones the current base state into an in-memory `sandboxState` (`structuredClone(baseState)`).
@@ -77,15 +78,15 @@ Read this file and [`docs/ROADMAP.md`](docs/ROADMAP.md) first before modifying t
    - Exiting What-If sets `sandboxState = null` (with `<CourseCard key={...-sim|live} />` remounting cleanly) so 100% of saved values revert immediately.
 
 4. **Destructive Action Safety**:
-   - Deleting a **Term** or **Course** must open `ConfirmDeleteModal`.
+   - Deleting a **Term** or **Course**, or replacing existing tracker courses via **Save Copy Locally** from a shared view, must open `ConfirmDeleteModal`.
    - Deleting an **Assessment Row** uses inline 2-step confirmation (`×` → `Delete?`) inside `CourseCard.jsx`.
-   - Every confirmed deletion pushes onto the Undo stack and surfaces an inline `Undo` action in the toast notification.
+   - Every confirmed deletion or local replacement pushes onto the Undo stack and surfaces an inline `Undo` action in the toast notification.
 
 5. **Firebase Google Sign-In, Firestore Rules & Security Invariants (`src/services/cloudSync.js`, `firestore.rules`)**:
    - **Auth Flow**: Always use `signInWithPopup` (never `signInWithRedirect`, which breaks on `github.io` vs `firebaseapp.com` due to browser third-party storage partitioning).
-   - **Zero PII & Stateless Firestore Lite**: Uses `firebase/firestore/lite` so zero IndexedDB grade copies persist on disk (`E3`). Never write `email`, `displayName`, or `photoURL` to Firestore or `localStorage` — `users/{uid}` stores only `{ stateJson, updatedAt, rev, shareToken }`.
-   - **Optimistic Concurrency (`rev`) & Atomic Share Sync**: Every cloud save runs in a single `writeBatch` incrementing `rev` by `+1` (`rev == 1` on create, `rev == resource.data.rev + 1` on update) with `updatedAt: serverTimestamp()`, updating `shares/{shareToken}` in the same batch when live sharing is active. Rotating or disabling a live share link deletes `shares/{oldToken}` in the same `writeBatch` (`getAfter` enforces 1-to-1 binding).
-   - **Shared-Computer Account Isolation**: `grade_tracker_sync_meta_v1` tracks `lastSyncedUid`. Signing out wipes `grade_tracker_v1`, sync metadata, and React's Undo/Redo stack. If a different Google account signs in over leftover local edits, `CloudSyncManager` never auto-uploads — it prompts with a safe default to load/start clean for the new account.
+   - **Zero Grade PII & Stateless Firestore Lite**: Uses `firebase/firestore/lite` so zero IndexedDB grade copies persist on disk (`E3`). Never write `email`, `displayName`, or `photoURL` to Firestore or `localStorage` — `users/{uid}` stores only `{ stateJson, updatedAt, rev, shareToken }`. Note that Firebase Auth itself stores the active OAuth session token/profile in browser IndexedDB while signed in and clears it on `Sign Out`.
+   - **Optimistic Concurrency (`rev`) & Orphan-Free Atomic Share Sync**: Every cloud save runs in a single `writeBatch` incrementing `rev` by `+1` (`rev == 1` on create, `rev == resource.data.rev + 1` on update) with `updatedAt: serverTimestamp()`, updating `shares/{shareToken}` in the same batch when live sharing is active. Rotating, disabling, or deleting user data deletes `shares/{oldToken}` in the same `writeBatch`; `firestore.rules` enforces symmetric 1-to-1 binding via both `getAfter(...)` and `!existsAfter(...)`.
+   - **Shared-Computer, Multi-Tab & Cloud-Delete Safety**: `grade_tracker_sync_meta_v1` tracks `lastSyncedUid` and `lastSyncedRev`. Signing out flushes pending online edits first (prompting before discarding offline/unsynced changes), then wipes `grade_tracker_v1`, sync metadata, and Undo/Redo state across all open tabs (`storage` + `onAuthStateChanged(null)`). Pre-existing custom local courses trigger `'initial-merge'` instead of silent overwrite; another account's leftover local edits trigger `'account-switch'`; and if **Delete Cloud Data** is run on one device while another device is still signed in at `lastSyncedRev > 0`, the second device surfaces a `'remote-deleted'` prompt (**Sign Out & Clear** vs **Re-Upload Courses**) rather than silently recreating `users/{uid}`.
    - **XSS & Origin Boundary**: Never use `dangerouslySetInnerHTML`. Every remote `stateJson` (both `users/{uid}` and `shares/{token}`) must pass `validateTrackerState` before entering React state. Note that all GitHub Pages apps under `<owner>.github.io/*` share one browser origin, so never deploy untrusted third-party JS under the same GitHub Pages account.
 
 ---
