@@ -40,6 +40,8 @@ Read this file and [`docs/ROADMAP.md`](docs/ROADMAP.md) first before modifying t
 │   │   ├── TermTabs.jsx              # Multi-term tabs, inline rename, delete trigger, Collapse/Expand All
 │   │   ├── CourseCard.jsx            # Collapsible/draggable course sheet, inline numeric cells, 2-click row delete, target bar
 │   │   ├── GradeScaleCard.jsx        # Sticky Grading Scale reference + Customize trigger
+│   │   ├── ErrorBoundary.jsx         # Top-level crash recovery boundary with local backup export
+│   │   ├── useDraftText.js           # Space-safe & empty-safe controlled text draft hook
 │   │   ├── Modals.jsx                # Unified ShareModal (Live #view Link + Static Snapshot), ScaleEditorModal, ConfirmDeleteModal
 │   │   └── SyncModals.jsx            # CloudSyncModal (Google Sign-In, Sync Now, Sign Out, Delete Cloud Data) & SyncConflictModal
 │   └── styles/
@@ -69,10 +71,10 @@ Read this file and [`docs/ROADMAP.md`](docs/ROADMAP.md) first before modifying t
    - Courses with `passFail: true` display `P` / `NP` / `P/F` and are excluded from GPA denominators while still counting toward enrolled credits and weighted percentage averages.
 
 2. **Atomic State + Undo/Redo (`src/App.jsx`)**:
-   - `App.jsx` stores `{ current, past, future, localSaveSeq, needsPersist }` in a single `doc` state object so `commitState`, `updateCurrentWithoutHistory`, `handleUndo`, and `handleRedo` remain 100% pure under React 19 `<StrictMode>` (`storageService.prepareForSave(...)` inside updaters, persisted once via `useEffect`).
-   - Rapid consecutive character edits sharing a `coalesceKey` within `700ms` coalesce into a single Undo step; structural mutations and deletions never coalesce.
-   - UI-only toggles (`activeTermId` tab switch, `collapsed` fold state) use `updateCurrentWithoutHistory` so folding cards does not pollute the Undo stack or touch `lastUpdated`.
-   - Remote cloud pulls and cross-tab storage resets clear stale Undo/Redo stacks (`past: [], future: []`) so Undo cannot overwrite another device's edits without conflict detection.
+   - `App.jsx` stores `{ current, past, future, localSaveSeq, cloudSaveSeq }` in a single `doc` state object so `commitState`, `updateCurrentWithoutHistory`, `handleUndo`, and `handleRedo` remain 100% pure under React 19 `<StrictMode>` (`storageService.prepareForSave(...)` inside updaters, persisted once via `useEffect`).
+   - Rapid consecutive character edits sharing a `coalesceKey` within `700ms` coalesce into a single Undo step; structural mutations and deletions never coalesce. No-op commits (e.g., focusing and blurring an unchanged cell) are short-circuited without creating Undo entries or cloud writes.
+   - UI-only toggles (`activeTermId` tab switch, `collapsed` fold state) use `updateCurrentWithoutHistory` (incrementing `localSaveSeq` only, `syncToCloud: false`) so folding cards or switching tabs persists locally without polluting the Undo stack, touching `lastUpdated`, or triggering Firestore `rev++` writes. Undo/Redo (`Ctrl/Cmd+Z`, `Ctrl/Cmd+Shift+Z`, `Ctrl+Y`) preserves the current `activeTermId` and `collapsed` UI state across matching terms/courses.
+   - Remote cloud pulls and cross-tab storage resets clear stale Undo/Redo stacks (`past: [], future: []`) only when canonical academic data actually changed so Undo cannot overwrite another device's edits without conflict detection.
 
 3. **What-If Simulator Sandbox Isolation (`src/App.jsx`)**:
    - Entering What-If Simulator clones the current base state into an in-memory `sandboxState` (`structuredClone(baseState)`).
@@ -82,7 +84,7 @@ Read this file and [`docs/ROADMAP.md`](docs/ROADMAP.md) first before modifying t
 4. **Destructive Action Safety**:
    - Deleting a **Term** or **Course**, or replacing existing tracker courses via **Save Copy Locally** from a shared view, must open `ConfirmDeleteModal`.
    - Deleting an **Assessment Row** uses inline 2-step confirmation (`×` → `Delete?`) inside `CourseCard.jsx`.
-   - Every confirmed deletion or local replacement pushes onto the Undo stack and surfaces an inline `Undo` action in the toast notification.
+   - Every confirmed deletion or local replacement pushes onto the Undo stack (restorable via the toolbar `↶ Undo` button or `Ctrl/Cmd+Z`) and shows a confirmation toast.
 
 5. **Firebase Google Sign-In, Firestore Rules & Security Invariants (`src/services/cloudSync.js`, `firestore.rules`)**:
    - **Auth Flow**: Always use `signInWithPopup` (never `signInWithRedirect`, which breaks on `github.io` vs `firebaseapp.com` due to browser third-party storage partitioning).

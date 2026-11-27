@@ -109,19 +109,76 @@ function computeSandboxDiff(baseState, sandboxState) {
   return { modifiedCatIds, changeCount };
 }
 
+function serializeStateExcludingTimestamp(s) {
+  if (!s) return '';
+  return JSON.stringify({
+    version: s.version,
+    studentName: s.studentName,
+    activeTermId: s.activeTermId,
+    gradeScale: s.gradeScale,
+    terms: s.terms,
+  });
+}
+
+function areStatesIdenticalExcludingTimestamp(a, b) {
+  if (a === b) return true;
+  return (
+    serializeStateExcludingTimestamp(a) === serializeStateExcludingTimestamp(b)
+  );
+}
+
+/**
+ * Preserves local UI view state (`collapsed` per course and `activeTermId` when
+ * the set of term IDs is unchanged) across Undo / Redo snapshots (#52).
+ */
+function preserveCurrentUiState(targetSnapshot, currentState) {
+  if (!targetSnapshot || !currentState) return targetSnapshot;
+
+  const collapsedByCourseId = new Map();
+  for (const term of currentState.terms || []) {
+    for (const course of term.courses || []) {
+      collapsedByCourseId.set(course.id, Boolean(course.collapsed));
+    }
+  }
+
+  const targetTerms = (targetSnapshot.terms || []).map((term) => ({
+    ...term,
+    courses: (term.courses || []).map((course) =>
+      collapsedByCourseId.has(course.id)
+        ? { ...course, collapsed: collapsedByCourseId.get(course.id) }
+        : course,
+    ),
+  }));
+
+  const currentTermIds = (currentState.terms || []).map((t) => t.id).join('\0');
+  const targetTermIds = targetTerms.map((t) => t.id).join('\0');
+  const sameTerms = currentTermIds === targetTermIds;
+  const activeTermId =
+    sameTerms && targetTerms.some((t) => t.id === currentState.activeTermId)
+      ? currentState.activeTermId
+      : targetSnapshot.activeTermId;
+
+  return {
+    ...targetSnapshot,
+    activeTermId,
+    terms: targetTerms,
+  };
+}
+
 export default function App() {
   const [doc, setDoc] = useState(() => ({
     current: storageService.load(),
     past: [],
     future: [],
     localSaveSeq: 0,
-    needsPersist: false,
+    cloudSaveSeq: 0,
   }));
   const state = doc.current;
   const stateRef = useRef(state);
   stateRef.current = state;
   const lastCoalesceRef = useRef({ key: null, time: 0 });
-  const lastPersistedSeqRef = useRef(0);
+  const lastPersistedLocalSeqRef = useRef(0);
+  const lastPersistedCloudSeqRef = useRef(0);
 
   const [syncSnapshot, setSyncSnapshot] = useState(() =>
     cloudSyncManager.getSnapshot(),
@@ -148,14 +205,13 @@ export default function App() {
   const [dragOverIndex, setDragOverIndex] = useState(null);
   const [toast, setToast] = useState(null);
 
-  const showToast = useCallback((text, { showUndo = false } = {}) => {
-    setToast({ text, showUndo });
+  const showToast = useCallback((text) => {
+    setToast({ text });
   }, []);
 
   useEffect(() => {
     if (!toast) return undefined;
-    const duration = toast.showUndo ? 5500 : 2600;
-    const t = setTimeout(() => setToast(null), duration);
+    const t = setTimeout(() => setToast(null), 3200);
     return () => clearTimeout(t);
   }, [toast]);
 
@@ -171,7 +227,7 @@ export default function App() {
         past: [],
         future: [],
         localSaveSeq: prev.localSaveSeq || 0,
-        needsPersist: false,
+        cloudSaveSeq: prev.cloudSaveSeq || 0,
       }));
     });
     const unsubSync = cloudSyncManager.subscribe((nextSnap) => {
@@ -328,19 +384,20 @@ export default function App() {
     setSandboxState(structuredClone(baseState));
   }, [baseState]);
 
-  // Persist committed local user edits once outside pure `setDoc` updaters (#14)
-  const { localSaveSeq, needsPersist } = doc;
+  // Persist committed local user edits once outside pure `setDoc` updaters (#14, #42)
+  const { localSaveSeq, cloudSaveSeq } = doc;
   useEffect(() => {
-    if (localSaveSeq > lastPersistedSeqRef.current) {
-      lastPersistedSeqRef.current = localSaveSeq;
-      if (needsPersist) {
-        storageService.save(state, {
-          touchTimestamp: false,
-          notifyListeners: false,
-        });
-      }
+    if (localSaveSeq > lastPersistedLocalSeqRef.current) {
+      const shouldSyncCloud = cloudSaveSeq > lastPersistedCloudSeqRef.current;
+      lastPersistedLocalSeqRef.current = localSaveSeq;
+      lastPersistedCloudSeqRef.current = cloudSaveSeq;
+      storageService.save(state, {
+        touchTimestamp: false,
+        notifyListeners: false,
+        syncToCloud: shouldSyncCloud,
+      });
     }
-  }, [localSaveSeq, needsPersist, state]);
+  }, [localSaveSeq, cloudSaveSeq, state]);
 
   const safePrepareForSave = useCallback((candidate, options) => {
     try {
@@ -369,12 +426,16 @@ export default function App() {
           touchTimestamp,
           nowIso,
         });
-        if (!prepared) return prev;
+        if (
+          !prepared ||
+          areStatesIdenticalExcludingTimestamp(prev.current, prepared)
+        ) {
+          return prev;
+        }
         return {
           ...prev,
           current: prepared,
           localSaveSeq: (prev.localSaveSeq || 0) + 1,
-          needsPersist: true,
         };
       });
     },
@@ -412,15 +473,30 @@ export default function App() {
           touchTimestamp,
           nowIso,
         });
-        if (!prepared) return prev;
+        if (
+          !prepared ||
+          areStatesIdenticalExcludingTimestamp(prev.current, prepared)
+        ) {
+          return prev;
+        }
+        let nextPast;
+        if (shouldCoalesce) {
+          const revertedToPreBurst =
+            prev.past.length > 0 &&
+            areStatesIdenticalExcludingTimestamp(
+              prev.past[prev.past.length - 1],
+              prepared,
+            );
+          nextPast = revertedToPreBurst ? prev.past.slice(0, -1) : prev.past;
+        } else {
+          nextPast = [...prev.past.slice(-(MAX_HISTORY - 1)), prev.current];
+        }
         return {
           current: prepared,
-          past: shouldCoalesce
-            ? prev.past
-            : [...prev.past.slice(-(MAX_HISTORY - 1)), prev.current],
+          past: nextPast,
           future: [],
           localSaveSeq: (prev.localSaveSeq || 0) + 1,
-          needsPersist: true,
+          cloudSaveSeq: (prev.cloudSaveSeq || 0) + 1,
         };
       });
     },
@@ -433,7 +509,10 @@ export default function App() {
     const nowIso = new Date().toISOString();
     setDoc((prev) => {
       if (prev.past.length === 0) return prev;
-      const previous = prev.past[prev.past.length - 1];
+      const previous = preserveCurrentUiState(
+        prev.past[prev.past.length - 1],
+        prev.current,
+      );
       const restored = safePrepareForSave(previous, {
         touchTimestamp: true,
         nowIso,
@@ -444,7 +523,7 @@ export default function App() {
         past: prev.past.slice(0, -1),
         future: [prev.current, ...prev.future.slice(0, MAX_HISTORY - 1)],
         localSaveSeq: (prev.localSaveSeq || 0) + 1,
-        needsPersist: true,
+        cloudSaveSeq: (prev.cloudSaveSeq || 0) + 1,
       };
     });
     showToast('Undid last change.');
@@ -457,7 +536,8 @@ export default function App() {
     setDoc((prev) => {
       if (prev.future.length === 0) return prev;
       const [nextItem, ...remainingFuture] = prev.future;
-      const restored = safePrepareForSave(nextItem, {
+      const mergedNext = preserveCurrentUiState(nextItem, prev.current);
+      const restored = safePrepareForSave(mergedNext, {
         touchTimestamp: true,
         nowIso,
       });
@@ -467,7 +547,7 @@ export default function App() {
         past: [...prev.past.slice(-(MAX_HISTORY - 1)), prev.current],
         future: remainingFuture,
         localSaveSeq: (prev.localSaveSeq || 0) + 1,
-        needsPersist: true,
+        cloudSaveSeq: (prev.cloudSaveSeq || 0) + 1,
       };
     });
     showToast('Redid change.');
@@ -577,14 +657,14 @@ export default function App() {
         past: [...prev.past.slice(-(MAX_HISTORY - 1)), prev.current],
         future: [],
         localSaveSeq: (prev.localSaveSeq || 0) + 1,
-        needsPersist: true,
+        cloudSaveSeq: (prev.cloudSaveSeq || 0) + 1,
       };
     });
     clearShareParamsFromCurrentUrl(window);
     clearLiveViewFromUrl(window);
     setLiveShareTokenView(null);
     setSharedState(null);
-    showToast('Saved shared courses into your tracker.', { showUndo: true });
+    showToast('Saved shared courses into your tracker.');
   }
 
   function handleSaveSharedCopyLocally() {
@@ -645,7 +725,7 @@ export default function App() {
       past: [],
       future: [],
       localSaveSeq: prev.localSaveSeq || 0,
-      needsPersist: false,
+      cloudSaveSeq: prev.cloudSaveSeq || 0,
     }));
     setShowSyncModal(false);
     showToast('Signed out and cleared local cached grades.');
@@ -664,7 +744,7 @@ export default function App() {
       past: [],
       future: [],
       localSaveSeq: prev.localSaveSeq || 0,
-      needsPersist: false,
+      cloudSaveSeq: prev.cloudSaveSeq || 0,
     }));
     setShowSyncModal(false);
     showToast('Deleted cloud data and cleared local browser cache.');
@@ -704,11 +784,16 @@ export default function App() {
 
   // --- Term Mutations ---
   function handleSelectTerm(termId) {
+    if (activeState.activeTermId === termId) return;
     if (isSharedReadOnly && !simMode) {
-      setSharedState((prev) => ({ ...prev, activeTermId: termId }));
+      setSharedState((prev) =>
+        prev.activeTermId === termId ? prev : { ...prev, activeTermId: termId },
+      );
       return;
     }
-    updateCurrentWithoutHistory((prev) => ({ ...prev, activeTermId: termId }));
+    updateCurrentWithoutHistory((prev) =>
+      prev.activeTermId === termId ? prev : { ...prev, activeTermId: termId },
+    );
   }
 
   function handleAddTerm() {
@@ -723,10 +808,16 @@ export default function App() {
   }
 
   function handleRenameTerm(termId, newName) {
-    commitState((prev) => ({
-      ...prev,
-      terms: prev.terms.map((t) => (t.id === termId ? { ...t, name: newName } : t)),
-    }));
+    const existingTerm = activeState.terms.find((t) => t.id === termId);
+    if (existingTerm && existingTerm.name === newName) return;
+    commitState((prev) => {
+      const target = prev.terms.find((t) => t.id === termId);
+      if (!target || target.name === newName) return prev;
+      return {
+        ...prev,
+        terms: prev.terms.map((t) => (t.id === termId ? { ...t, name: newName } : t)),
+      };
+    });
   }
 
   function requestDeleteTerm(termId) {
@@ -779,6 +870,11 @@ export default function App() {
 
   function handleUpdateCourse(courseId, patch) {
     const keys = Object.keys(patch);
+    if (keys.length === 0) return;
+    const currentCourse = allCoursesInTerm.find((c) => c.id === courseId);
+    if (currentCourse && keys.every((k) => Object.is(currentCourse[k], patch[k]))) {
+      return;
+    }
     const onlyUiState = keys.every((k) => k === 'collapsed');
 
     if (isSharedReadOnly && !simMode && onlyUiState) {
@@ -798,40 +894,30 @@ export default function App() {
       return;
     }
 
+    const applyCoursePatch = (prev) => {
+      let changed = false;
+      const nextTerms = prev.terms.map((t) => {
+        if (t.id !== activeTerm.id) return t;
+        const nextCourses = t.courses.map((c) => {
+          if (c.id !== courseId) return c;
+          if (keys.every((k) => Object.is(c[k], patch[k]))) return c;
+          changed = true;
+          return { ...c, ...patch };
+        });
+        return changed ? { ...t, courses: nextCourses } : t;
+      });
+      return changed ? { ...prev, terms: nextTerms } : prev;
+    };
+
     if (onlyUiState) {
-      updateCurrentWithoutHistory((prev) => ({
-        ...prev,
-        terms: prev.terms.map((t) =>
-          t.id !== activeTerm.id
-            ? t
-            : {
-                ...t,
-                courses: t.courses.map((c) =>
-                  c.id === courseId ? { ...c, ...patch } : c,
-                ),
-              },
-        ),
-      }));
+      updateCurrentWithoutHistory(applyCoursePatch);
       return;
     }
 
     const isTextPatch = keys.every((k) => k === 'code' || k === 'title');
-    commitState(
-      (prev) => ({
-        ...prev,
-        terms: prev.terms.map((t) =>
-          t.id !== activeTerm.id
-            ? t
-            : {
-                ...t,
-                courses: t.courses.map((c) =>
-                  c.id === courseId ? { ...c, ...patch } : c,
-                ),
-              },
-        ),
-      }),
-      { coalesceKey: isTextPatch ? `course-${courseId}-${keys[0]}` : null },
-    );
+    commitState(applyCoursePatch, {
+      coalesceKey: isTextPatch ? `course-${courseId}-${keys[0]}` : null,
+    });
   }
 
   function requestDeleteCourse(course) {
@@ -876,7 +962,7 @@ export default function App() {
         };
       });
       setPendingDelete(null);
-      showToast(`Deleted term "${target?.name || 'Term'}".`, { showUndo: !simMode });
+      showToast(`Deleted term "${target?.name || 'Term'}".`);
     } else if (pendingDelete.kind === 'course') {
       const label = pendingDelete.code || 'Course';
       commitState((prev) => ({
@@ -891,7 +977,7 @@ export default function App() {
         ),
       }));
       setPendingDelete(null);
-      showToast(`Deleted course "${label}".`, { showUndo: !simMode });
+      showToast(`Deleted course "${label}".`);
     }
   }
 
@@ -929,27 +1015,32 @@ export default function App() {
 
   function handleUpdateCategory(courseId, catId, patch) {
     const keys = Object.keys(patch);
+    if (keys.length === 0) return;
+    const currentCourse = allCoursesInTerm.find((c) => c.id === courseId);
+    const currentCat = currentCourse?.categories.find((cat) => cat.id === catId);
+    if (currentCat && keys.every((k) => Object.is(currentCat[k], patch[k]))) {
+      return;
+    }
+
     commitState(
-      (prev) => ({
-        ...prev,
-        terms: prev.terms.map((t) =>
-          t.id !== activeTerm.id
-            ? t
-            : {
-                ...t,
-                courses: t.courses.map((c) =>
-                  c.id !== courseId
-                    ? c
-                    : {
-                        ...c,
-                        categories: c.categories.map((cat) =>
-                          cat.id === catId ? { ...cat, ...patch } : cat,
-                        ),
-                      },
-                ),
-              },
-        ),
-      }),
+      (prev) => {
+        let changed = false;
+        const nextTerms = prev.terms.map((t) => {
+          if (t.id !== activeTerm.id) return t;
+          const nextCourses = t.courses.map((c) => {
+            if (c.id !== courseId) return c;
+            const nextCats = c.categories.map((cat) => {
+              if (cat.id !== catId) return cat;
+              if (keys.every((k) => Object.is(cat[k], patch[k]))) return cat;
+              changed = true;
+              return { ...cat, ...patch };
+            });
+            return changed ? { ...c, categories: nextCats } : c;
+          });
+          return changed ? { ...t, courses: nextCourses } : t;
+        });
+        return changed ? { ...prev, terms: nextTerms } : prev;
+      },
       { coalesceKey: `cat-${catId}-${keys[0]}` },
     );
   }
@@ -973,7 +1064,7 @@ export default function App() {
             },
       ),
     }));
-    showToast(`Deleted "${catName}".`, { showUndo: !simMode });
+    showToast(`Deleted "${catName}".`);
   }
 
   const allExistingCourses = activeState.terms.flatMap((t) => t.courses);
@@ -1078,12 +1169,14 @@ export default function App() {
         canRedo={!simMode && doc.future.length > 0}
         onUndo={handleUndo}
         onRedo={handleRedo}
-        onChangeName={(name) =>
+        onChangeName={(name) => {
+          if (activeState.studentName === name) return;
           commitState(
-            (prev) => ({ ...prev, studentName: name }),
+            (prev) =>
+              prev.studentName === name ? prev : { ...prev, studentName: name },
             { coalesceKey: 'owner-name' },
-          )
-        }
+          );
+        }}
         onToggleSimMode={handleToggleSimMode}
         onOpenSync={handleOpenSyncControl}
         onOpenShare={handleOpenShareModal}
@@ -1331,7 +1424,7 @@ export default function App() {
                 past: [],
                 future: [],
                 localSaveSeq: prev.localSaveSeq || 0,
-                needsPersist: false,
+                cloudSaveSeq: prev.cloudSaveSeq || 0,
               }));
               if (reason === 'remote-deleted' || !snap?.user) {
                 showToast('Signed out and cleared local cached grades.');
@@ -1378,15 +1471,6 @@ export default function App() {
       {toast && (
         <div className="toast" role="status" aria-live="polite">
           <span>{toast.text}</span>
-          {toast.showUndo && !simMode && doc.past.length > 0 && (
-            <button
-              type="button"
-              className="toast-undo-btn"
-              onClick={handleUndo}
-            >
-              Undo
-            </button>
-          )}
         </div>
       )}
     </div>

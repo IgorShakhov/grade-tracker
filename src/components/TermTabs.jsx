@@ -23,7 +23,8 @@ export default function TermTabs({
 
   function commitRename(termId) {
     const trimmed = draftName.trim();
-    if (trimmed) {
+    const existing = terms.find((t) => t.id === termId);
+    if (trimmed && (!existing || existing.name !== trimmed)) {
       onRenameTerm(termId, trimmed);
     }
     setEditingTermId(null);

@@ -19,7 +19,7 @@ If you are an AI coding assistant (Antigravity, Cursor, Claude Code, Copilot, et
 - **Collapsible & Reorderable Course Cards**: Expand or collapse course cards for a compact overview and reorder courses via drag-and-drop or keyboard controls.
 - **Course Presets, Duplication & Term Transfers**: Start quickly from reusable course templates, duplicate existing course structures, or move courses between terms.
 - **Full Sandbox What-If Simulator**: Preview how hypothetical changes to any grade, weight, unit, or course affect your final standing and GPA in an isolated memory sandbox without overwriting saved data.
-- **Undo / Redo & Safe Deletions**: Multi-step Undo/Redo history (`Ctrl/Cmd+Z` / `Ctrl/Cmd+Shift+Z`) paired with confirmation dialogs for term/course deletions and 2-click inline confirmation for assessment rows.
+- **Undo / Redo & Safe Deletions**: Multi-step Undo/Redo history (`Ctrl/Cmd+Z` / `Ctrl/Cmd+Shift+Z` / `Ctrl+Y`) paired with confirmation dialogs for term/course deletions and 2-click inline confirmation for assessment rows.
 - **Remaining-Weight Target Grade Calculator**: Select a desired target percentage to see the exact average required across remaining ungraded coursework.
 - **Configurable Grading Scale**: Supports standard 4.0 GPA scales and customizable percentage-to-GPA/letter-grade thresholds.
 - **1-Click Google Cloud Sync (Firebase Auth + Firestore)**: Sign in with Google on any laptop, phone, or tablet to automatically keep courses synced across devices with automatic session refresh, offline local caching, multi-device conflict resolution, and safe sign-out cache clearing.

@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { STORAGE_KEY } from '../../src/domain/constants.js';
 import { createInitialState } from '../../src/domain/templates.js';
 import { StorageService, createMemoryStorage } from '../../src/services/storage.js';
@@ -1128,6 +1128,57 @@ describe('CloudSyncManager & Firestore Security Rules Invariants (cloudSync.js)'
 
     tab1.stop();
     tab2.stop();
+  });
+
+  it('does not push Firestore rev++ writes for UI-only toggles (collapsed/activeTermId) and skips redundant notify on equivalent syncNow (#42)', async () => {
+    const fbMock = createRulesEnforcingFirebaseMock();
+    const mem = createMemoryStorage();
+    const storageSvc = new StorageService({ storage: mem });
+    const mgr = new CloudSyncManager({
+      firebaseFactory: () => fbMock.service,
+      storage: mem,
+      storageSvc,
+      debounceMs: 10,
+    });
+    mgr.start();
+
+    fbMock.setPopupUser({ uid: 'user-ui', email: 'ui@example.com' });
+    await mgr.signInWithGoogle();
+    expect(fbMock.docs.get('users/user-ui').rev).toBe(1);
+
+    // 1. Explicit syncToCloud: false (used by App updateCurrentWithoutHistory) stays strictly local
+    const folded = storageSvc.load();
+    folded.terms[0].courses[0].collapsed = true;
+    storageSvc.save(folded, { touchTimestamp: false, syncToCloud: false });
+    await new Promise((r) => setTimeout(r, 30));
+    expect(mgr.getSnapshot().dirty).toBe(false);
+    expect(fbMock.docs.get('users/user-ui').rev).toBe(1);
+
+    // 2. Even direct storageSvc.save() with only UI toggle differences skips Firestore push
+    const switchedTab = storageSvc.load();
+    switchedTab.terms[0].courses[1].collapsed = true;
+    storageSvc.save(switchedTab, { touchTimestamp: false });
+    await new Promise((r) => setTimeout(r, 30));
+    expect(mgr.getSnapshot().dirty).toBe(false);
+    expect(fbMock.docs.get('users/user-ui').rev).toBe(1);
+
+    // 3. Equivalent remote rev bump on syncNow updates rev without wiping local UI state via notify
+    const remoteSame = createInitialState();
+    fbMock.seedDirect('users/user-ui', {
+      stateJson: JSON.stringify(remoteSame),
+      updatedAt: 'ts-2',
+      rev: 2,
+      shareToken: null,
+    });
+    const notifySpy = vi.fn();
+    const unsub = storageSvc.subscribe(notifySpy);
+    await mgr.syncNow(storageSvc.load());
+    expect(mgr.getSnapshot().rev).toBe(2);
+    expect(notifySpy).not.toHaveBeenCalled();
+    expect(storageSvc.load().terms[0].courses[0].collapsed).toBe(true);
+
+    unsub();
+    mgr.stop();
   });
 });
 

@@ -130,7 +130,7 @@ export default function HeaderLedger({
                   className="btn btn-sm"
                   disabled={!canRedo}
                   onClick={onRedo}
-                  title="Redo change (Ctrl/Cmd+Shift+Z)"
+                  title="Redo change (Ctrl/Cmd+Shift+Z or Ctrl+Y)"
                 >
                   ↷ Redo
                 </button>

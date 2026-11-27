@@ -8,6 +8,33 @@ import {
 } from '../domain/calculations.js';
 import { useDraftText } from './useDraftText.js';
 
+const STRICT_DECIMAL_RE = /^(?:\d+(?:\.\d*)?|\.\d+)$/;
+
+function parseDecimalInput(raw) {
+  const normalized = String(raw ?? '')
+    .trim()
+    .replace(/%$/, '')
+    .trim()
+    .replace(',', '.');
+  if (normalized === '') {
+    return { kind: 'empty', value: null };
+  }
+  if (!STRICT_DECIMAL_RE.test(normalized)) {
+    return { kind: 'invalid', value: null };
+  }
+  const num = Number(normalized);
+  if (!Number.isFinite(num) || num < 0 || num > 1000) {
+    return { kind: 'invalid', value: null };
+  }
+  return { kind: 'number', value: num === 0 ? 0 : num };
+}
+
+function areCellValuesEqual(a, b) {
+  const normA = typeof a === 'number' && Number.isFinite(a) ? a : null;
+  const normB = typeof b === 'number' && Number.isFinite(b) ? b : null;
+  return normA === normB;
+}
+
 function NumericCellInput({
   value,
   placeholder = '—',
@@ -32,29 +59,33 @@ function NumericCellInput({
   function handleChange(e) {
     const raw = e.target.value;
     setDraft(raw);
-    const trimmed = raw.trim().replace(/%$/, '');
-    if (trimmed === '') {
-      onCommit(null);
+    const parsed = parseDecimalInput(raw);
+    if (parsed.kind === 'empty') {
+      if (!areCellValuesEqual(null, value)) {
+        onCommit(null);
+      }
       return;
     }
-    const num = Number(trimmed);
-    if (Number.isFinite(num) && num >= 0 && num <= 1000) {
-      onCommit(num);
+    if (parsed.kind === 'number' && !areCellValuesEqual(parsed.value, value)) {
+      onCommit(parsed.value);
     }
   }
 
   function handleBlur() {
     setFocused(false);
-    const trimmed = draft.trim().replace(/%$/, '');
-    if (trimmed === '') {
-      onCommit(null);
+    const parsed = parseDecimalInput(draft);
+    if (parsed.kind === 'empty') {
+      if (!areCellValuesEqual(null, value)) {
+        onCommit(null);
+      }
       setDraft('');
       return;
     }
-    const num = Number(trimmed);
-    if (Number.isFinite(num) && num >= 0 && num <= 1000) {
-      onCommit(num);
-      setDraft(num.toFixed(2));
+    if (parsed.kind === 'number') {
+      if (!areCellValuesEqual(parsed.value, value)) {
+        onCommit(parsed.value);
+      }
+      setDraft(parsed.value.toFixed(2));
     } else {
       setDraft(
         typeof value === 'number' && Number.isFinite(value) ? value.toFixed(2) : '',
@@ -62,15 +93,25 @@ function NumericCellInput({
     }
   }
 
+  const isAbove100 =
+    typeof value === 'number' && Number.isFinite(value) && value > 100;
+
   return (
     <input
       type="text"
       inputMode="decimal"
-      className={`cell-input num-input ${isSimInput ? 'sim-input' : ''}`}
+      className={`cell-input num-input ${isSimInput ? 'sim-input' : ''} ${
+        isAbove100 ? 'cell-warn' : ''
+      }`.trim()}
       value={draft}
       placeholder={placeholder}
       disabled={disabled}
       aria-label={ariaLabel}
+      title={
+        isAbove100
+          ? 'Above 100% — verify bonus credit or extra syllabus weight'
+          : undefined
+      }
       onFocus={(e) => {
         setFocused(true);
         e.target.select();

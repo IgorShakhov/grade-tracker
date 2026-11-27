@@ -339,6 +339,7 @@ export class CloudSyncManager {
 
     this.debounceTimer = null;
     this.latestLocalState = null;
+    this.lastSyncedStateSnapshot = null;
     this.inFlightPromise = null;
     this.queuedFlushAfterFlight = false;
     this.usesBrowserLocalStorage =
@@ -401,6 +402,7 @@ export class CloudSyncManager {
 
   clearMeta() {
     this.meta = createDefaultMeta();
+    this.lastSyncedStateSnapshot = null;
     try {
       this.storage.removeItem(SYNC_META_KEY);
     } catch {
@@ -535,6 +537,7 @@ export class CloudSyncManager {
       this.queuedFlushAfterFlight = false;
       this.meta = this.loadMeta();
       this.conflict = null;
+      this.lastSyncedStateSnapshot = null;
       const reloaded = this.storageSvc.load();
       this.latestLocalState = reloaded;
       this.storageSvc.notify(reloaded);
@@ -568,9 +571,16 @@ export class CloudSyncManager {
     }
 
     if (event.key === trackerKey) {
+      const prevLocal = this.latestLocalState;
       const reloaded = this.storageSvc.load();
       this.latestLocalState = reloaded;
-      this.storageSvc.notify(reloaded);
+      if (
+        event.newValue === null ||
+        !prevLocal ||
+        !areTrackerStatesEquivalent(prevLocal, reloaded)
+      ) {
+        this.storageSvc.notify(reloaded);
+      }
     }
   }
 
@@ -584,6 +594,7 @@ export class CloudSyncManager {
   applyRemoteStateLocally(remoteState) {
     const validated = validateTrackerState(remoteState);
     this.latestLocalState = validated;
+    this.lastSyncedStateSnapshot = validated;
     this.storageSvc.saveLocalOnly(validated);
     this.storageSvc.notify(validated);
     return validated;
@@ -597,6 +608,7 @@ export class CloudSyncManager {
     }
     const fresh = createInitialState();
     this.latestLocalState = fresh;
+    this.lastSyncedStateSnapshot = null;
     this.storageSvc.saveLocalOnly(fresh);
     this.storageSvc.notify(fresh);
     return fresh;
@@ -622,6 +634,17 @@ export class CloudSyncManager {
    * Invoked automatically whenever the user saves an edit through `storageService.save(...)`.
    */
   handleLocalStateSaved(nextState) {
+    if (
+      !this.meta.dirty &&
+      this.currentUser &&
+      this.meta.lastSyncedUid === this.currentUser.uid &&
+      this.lastSyncedStateSnapshot &&
+      areTrackerStatesEquivalent(this.lastSyncedStateSnapshot, nextState)
+    ) {
+      this.latestLocalState = nextState;
+      return Promise.resolve();
+    }
+
     this.localMutationSeq += 1;
     this.latestLocalState = nextState;
     this.saveMeta({ dirty: true });
@@ -843,6 +866,8 @@ export class CloudSyncManager {
           }
         }
 
+        const sameAsRemote = areTrackerStatesEquivalent(localState, remoteState);
+        this.lastSyncedStateSnapshot = remoteState;
         this.saveMeta({
           lastSyncedUid: uid,
           lastSyncedRev: remoteRev,
@@ -850,7 +875,9 @@ export class CloudSyncManager {
           lastSyncedAt: new Date().toISOString(),
           dirty: false,
         });
-        this.applyRemoteStateLocally(remoteState);
+        if (!sameAsRemote) {
+          this.applyRemoteStateLocally(remoteState);
+        }
         this.status = 'synced';
         this.emit();
         return;
@@ -1097,6 +1124,7 @@ export class CloudSyncManager {
         await batch.commit();
         if (!this.isSessionCurrent(uid, startEpoch)) return;
         const hasNewerLocalEdits = this.localMutationSeq !== pushedSeq;
+        this.lastSyncedStateSnapshot = validated;
         this.saveMeta({
           lastSyncedUid: uid,
           lastSyncedRev: nextRev,
@@ -1135,6 +1163,7 @@ export class CloudSyncManager {
 
             if (areTrackerStatesEquivalent(currentLocal, remoteState)) {
               const hasNewerLocalEdits = this.localMutationSeq !== pushedSeq;
+              this.lastSyncedStateSnapshot = remoteState;
               this.saveMeta({
                 lastSyncedUid: uid,
                 lastSyncedRev: remoteRev,
@@ -1142,9 +1171,6 @@ export class CloudSyncManager {
                 lastSyncedAt: new Date().toISOString(),
                 dirty: hasNewerLocalEdits,
               });
-              if (!hasNewerLocalEdits) {
-                this.applyRemoteStateLocally(remoteState);
-              }
               this.conflict = null;
               this.status = hasNewerLocalEdits
                 ? isBrowserOffline()
@@ -1317,6 +1343,8 @@ export class CloudSyncManager {
 
       const revChanged =
         remoteRev !== this.meta.lastSyncedRev || Boolean(this.meta.dirty);
+      const sameAsRemote = areTrackerStatesEquivalent(localState, remoteState);
+      this.lastSyncedStateSnapshot = remoteState;
       this.saveMeta({
         lastSyncedUid: uid,
         lastSyncedRev: remoteRev,
@@ -1324,7 +1352,7 @@ export class CloudSyncManager {
         lastSyncedAt: new Date().toISOString(),
         dirty: false,
       });
-      if (revChanged) {
+      if (revChanged && !sameAsRemote) {
         this.applyRemoteStateLocally(remoteState);
       }
       this.conflict = null;
@@ -1498,9 +1526,13 @@ export class CloudSyncManager {
         const remoteState = validateTrackerState(JSON.parse(data.stateJson));
 
         if ((this.meta.lastSyncedRev || 0) !== baseRev) {
+          const sameAsRemote = areTrackerStatesEquivalent(
+            effectiveState,
+            remoteState,
+          );
           if (
             (this.meta.dirty || this.localMutationSeq !== pushedSeq) &&
-            !areTrackerStatesEquivalent(effectiveState, remoteState)
+            !sameAsRemote
           ) {
             this.status = 'conflict';
             this.conflict = {
@@ -1514,7 +1546,11 @@ export class CloudSyncManager {
               'Cloud grades were updated on another device. Please resolve the sync conflict first.',
             );
           }
-          effectiveState = this.applyRemoteStateLocally(remoteState);
+          if (!sameAsRemote) {
+            effectiveState = this.applyRemoteStateLocally(remoteState);
+          } else {
+            this.lastSyncedStateSnapshot = remoteState;
+          }
         }
       } else if ((this.meta.lastSyncedRev || 0) > 0) {
         this.status = 'conflict';
@@ -1571,6 +1607,7 @@ export class CloudSyncManager {
       }
 
       const hasNewerLocalEdits = this.localMutationSeq !== pushedSeq;
+      this.lastSyncedStateSnapshot = effectiveState;
       this.saveMeta({
         lastSyncedUid: uid,
         lastSyncedRev: nextRev,
@@ -1673,9 +1710,13 @@ export class CloudSyncManager {
       const remoteState = validateTrackerState(JSON.parse(data.stateJson));
 
       if ((this.meta.lastSyncedRev || 0) !== baseRev) {
+        const sameAsRemote = areTrackerStatesEquivalent(
+          effectiveState,
+          remoteState,
+        );
         if (
           (this.meta.dirty || this.localMutationSeq !== pushedSeq) &&
-          !areTrackerStatesEquivalent(effectiveState, remoteState)
+          !sameAsRemote
         ) {
           this.status = 'conflict';
           this.conflict = {
@@ -1689,7 +1730,11 @@ export class CloudSyncManager {
             'Cloud grades were updated on another device. Please resolve the sync conflict first.',
           );
         }
-        effectiveState = this.applyRemoteStateLocally(remoteState);
+        if (!sameAsRemote) {
+          effectiveState = this.applyRemoteStateLocally(remoteState);
+        } else {
+          this.lastSyncedStateSnapshot = remoteState;
+        }
       }
 
       const stateJson = JSON.stringify(effectiveState);
@@ -1721,6 +1766,7 @@ export class CloudSyncManager {
       if (!this.isSessionCurrent(uid, startEpoch)) return;
 
       const hasNewerLocalEdits = this.localMutationSeq !== pushedSeq;
+      this.lastSyncedStateSnapshot = effectiveState;
       this.saveMeta({
         lastSyncedUid: uid,
         lastSyncedRev: nextRev,

@@ -614,14 +614,16 @@ describe('Grade Tracker React Application (M1 + M1.1 + Firebase Cloud Sync)', ()
     expect(storageService.load().terms[0].courses[0].code).toBe('ECON101');
     expect(undoBtn).toBeDisabled();
 
-    // Focusing, typing a partial edit, then clearing to '' and blurring restores the pre-focus code
+    // Focusing, typing a partial edit, then clearing to '' never strands 'M' in storage and leaves Undo clean on blur
     fireEvent.focus(codeInput);
     fireEvent.change(codeInput, { target: { value: 'M' } });
     fireEvent.change(codeInput, { target: { value: '' } });
     expect(codeInput).toHaveValue('');
+    expect(storageService.load().terms[0].courses[0].code).toBe('ECON101');
     fireEvent.blur(codeInput);
     expect(codeInput).toHaveValue('ECON101');
     expect(storageService.load().terms[0].courses[0].code).toBe('ECON101');
+    expect(undoBtn).toBeDisabled();
   });
 
   it('preserves trailing and internal spaces while typing owner names ("Jane Doe") and course codes ("MATH 101"), and does not snap cleared owner name to "My" until blur (#34)', () => {
@@ -702,6 +704,203 @@ describe('Grade Tracker React Application (M1 + M1.1 + Firebase Cloud Sync)', ()
       expect(screen.getByText('Recovered tracker view')).toBeInTheDocument();
     } finally {
       errSpy.mockRestore();
+    }
+  });
+
+  it('does not create Undo entries, touch lastUpdated, or call storageService.save when focusing and blurring unchanged cells (#35)', () => {
+    render(<App />);
+    const initialLastUpdated = storageService.load().lastUpdated;
+    const saveSpy = vi.spyOn(storageService, 'save');
+
+    try {
+      const undoBtn = screen.getByRole('button', { name: /↶ Undo/i });
+      const ecoSection = screen.getByRole('region', { name: 'Course ECON101' });
+      const gradeInputs = within(ecoSection).getAllByLabelText(
+        /ECON101 .* grade percent/i,
+      );
+      const weightInputs = within(ecoSection).getAllByLabelText(
+        /ECON101 .* weight percent/i,
+      );
+
+      // Graded cell focus -> blur
+      fireEvent.focus(gradeInputs[0]);
+      fireEvent.blur(gradeInputs[0]);
+
+      // Blank grade cell focus -> blur
+      const blankCell = gradeInputs.find((el) => el.value === '');
+      fireEvent.focus(blankCell);
+      fireEvent.blur(blankCell);
+
+      // Weight cell focus -> blur
+      fireEvent.focus(weightInputs[0]);
+      fireEvent.blur(weightInputs[0]);
+
+      expect(undoBtn).toBeDisabled();
+      expect(saveSpy).not.toHaveBeenCalled();
+      expect(storageService.load().lastUpdated).toBe(initialLastUpdated);
+    } finally {
+      saveSpy.mockRestore();
+    }
+  });
+
+  it('parses comma decimals ("85,5"), rejects hex/exponent strings ("0x10", "1e2"), and warns on values > 100% (#47)', () => {
+    render(<App />);
+    const ecoSection = screen.getByRole('region', { name: 'Course ECON101' });
+    const gradeInputs = within(ecoSection).getAllByLabelText(
+      /ECON101 .* grade percent/i,
+    );
+    const cell = gradeInputs[0];
+    const originalVal = cell.value;
+
+    // Reject hex and scientific notation
+    fireEvent.focus(cell);
+    fireEvent.change(cell, { target: { value: '0x10' } });
+    fireEvent.blur(cell);
+    expect(cell).toHaveValue(originalVal);
+
+    fireEvent.focus(cell);
+    fireEvent.change(cell, { target: { value: '1e2' } });
+    fireEvent.blur(cell);
+    expect(cell).toHaveValue(originalVal);
+
+    // Accept European comma decimal "85,5" -> 85.50, leading ".5" -> 0.50, and trailing "85." -> 85.00
+    fireEvent.focus(cell);
+    fireEvent.change(cell, { target: { value: '85,5' } });
+    fireEvent.blur(cell);
+    expect(cell).toHaveValue('85.50');
+    expect(storageService.load().terms[0].courses[0].categories[0].grade).toBe(85.5);
+    expect(cell).not.toHaveClass('cell-warn');
+
+    fireEvent.focus(cell);
+    fireEvent.change(cell, { target: { value: '.5' } });
+    fireEvent.blur(cell);
+    expect(cell).toHaveValue('0.50');
+    expect(storageService.load().terms[0].courses[0].categories[0].grade).toBe(0.5);
+
+    fireEvent.focus(cell);
+    fireEvent.change(cell, { target: { value: '85.' } });
+    fireEvent.blur(cell);
+    expect(cell).toHaveValue('85.00');
+    expect(storageService.load().terms[0].courses[0].categories[0].grade).toBe(85);
+
+    // Values > 100 apply inline warning class
+    fireEvent.focus(cell);
+    fireEvent.change(cell, { target: { value: '105' } });
+    fireEvent.blur(cell);
+    expect(cell).toHaveValue('105.00');
+    expect(cell).toHaveClass('cell-warn');
+  });
+
+  it('shows confirmation toasts without any toast Undo button while toolbar Undo still restores deletions (#44)', () => {
+    render(<App />);
+    const undoBtn = screen.getByRole('button', { name: /↶ Undo/i });
+
+    // 1. Delete an assessment row -> toast has text and NO button
+    const ecoSection = screen.getByRole('region', { name: 'Course ECON101' });
+    const table = within(ecoSection).getByRole('table');
+    const rowCountBefore = within(table).getAllByRole('row').length;
+    fireEvent.click(within(table).getAllByRole('button', { name: /^Delete /i })[0]);
+    fireEvent.click(within(table).getByRole('button', { name: /^Confirm delete /i }));
+
+    const rowToast = screen.getByRole('status');
+    expect(rowToast).toHaveTextContent(/Deleted "/i);
+    expect(within(rowToast).queryByRole('button')).toBeNull();
+
+    fireEvent.click(undoBtn);
+    expect(within(table).getAllByRole('row').length).toBe(rowCountBefore);
+
+    // 2. Delete a course -> toast has text and NO button, toolbar Undo restores course
+    fireEvent.click(screen.getByRole('button', { name: 'Delete ECON101' }));
+    fireEvent.click(screen.getByRole('button', { name: /^Delete Course$/i }));
+
+    const courseToast = screen.getByRole('status');
+    expect(courseToast).toHaveTextContent(/Deleted course "ECON101"\./i);
+    expect(within(courseToast).queryByRole('button')).toBeNull();
+
+    fireEvent.click(undoBtn);
+    expect(screen.getByDisplayValue('ECON101')).toBeInTheDocument();
+  });
+
+  it('keeps UI toggles local without Firestore batch writes (#42) and preserves collapsed/activeTermId across Undo and Ctrl+Y Redo (#52)', async () => {
+    const { cloudSyncManager } = await import('../../src/services/cloudSync.js');
+    const commitSpy = vi.fn().mockResolvedValue(undefined);
+    const origFactory = cloudSyncManager.firebaseFactory;
+    cloudSyncManager.firebaseFactory = () => ({
+      ...origFactory(),
+      writeBatch: () => ({
+        set: vi.fn(),
+        delete: vi.fn(),
+        commit: commitSpy,
+      }),
+    });
+
+    try {
+      render(<App />);
+
+      // Add a second term, switch back to Fall Term, and edit ECON101 grade
+      fireEvent.click(screen.getByRole('button', { name: /\+ Add Term/i }));
+      const tabs = screen.getAllByRole('tab');
+      fireEvent.click(tabs[0]);
+
+      const ecoSection = screen.getByRole('region', { name: 'Course ECON101' });
+      const firstGrade = within(ecoSection).getAllByLabelText(
+        /ECON101 .* grade percent/i,
+      )[0];
+      fireEvent.focus(firstGrade);
+      fireEvent.change(firstGrade, { target: { value: '99' } });
+      fireEvent.blur(firstGrade);
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      // Simulate active signed-in synced state and verify UI toggles do NOT trigger writeBatch.commit
+      act(() => {
+        cloudSyncManager.currentUser = { uid: 'u-42', email: 'u@example.com' };
+        cloudSyncManager.status = 'synced';
+        cloudSyncManager.saveMeta({
+          lastSyncedUid: 'u-42',
+          lastSyncedRev: 1,
+          dirty: false,
+        });
+        cloudSyncManager.lastSyncedStateSnapshot = storageService.load();
+        cloudSyncManager.emit();
+      });
+      commitSpy.mockClear();
+
+      // Collapse ECON101 and switch to Term 2 -> local only, zero cloud commits!
+      fireEvent.click(screen.getByRole('button', { name: 'Collapse ECON101' }));
+      fireEvent.click(screen.getAllByRole('tab')[1]);
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 25));
+      });
+      expect(commitSpy).not.toHaveBeenCalled();
+
+      // Undo the grade edit while on Term 2 -> stays on Term 2 AND keeps ECON101 collapsed!
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: /↶ Undo/i }));
+        await Promise.resolve();
+      });
+      expect(screen.getAllByRole('tab')[1]).toHaveAttribute('aria-selected', 'true');
+      expect(storageService.load().terms[0].courses[0].collapsed).toBe(true);
+      expect(storageService.load().terms[0].courses[0].categories[0].grade).not.toBe(99);
+
+      // Ctrl+Y Redo restores grade 99 while still keeping Term 2 active and ECON101 collapsed!
+      await act(async () => {
+        fireEvent.keyDown(window, { key: 'y', ctrlKey: true });
+        await Promise.resolve();
+      });
+      expect(screen.getAllByRole('tab')[1]).toHaveAttribute('aria-selected', 'true');
+      expect(storageService.load().terms[0].courses[0].collapsed).toBe(true);
+      expect(storageService.load().terms[0].courses[0].categories[0].grade).toBe(99);
+    } finally {
+      cloudSyncManager.cancelDebounce();
+      cloudSyncManager.firebaseFactory = origFactory;
+      act(() => {
+        cloudSyncManager.currentUser = null;
+        cloudSyncManager.status = 'disconnected';
+        cloudSyncManager.clearMeta();
+        cloudSyncManager.emit();
+      });
     }
   });
 });

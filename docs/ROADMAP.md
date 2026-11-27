@@ -29,7 +29,7 @@ This document tracks shipped milestones, upcoming features, and key technical de
   - Course creation presets (`Standard 25/35/40%`, `Blank`) and 1-click **Duplicate Course Structure** (copies category names & weights, clears grades).
   - `Term` / `Full Year` duration badge and **Move Course to Term** transfer selector.
 - **Undo / Redo & Delete Confirmations (PR #2)**:
-  - Atomic `{ current, past, future }` history stack with toolbar **`↶ Undo`** / **`↷ Redo`** buttons, `Ctrl/Cmd+Z` & `Ctrl/Cmd+Shift+Z` shortcuts, and Undo button inside deletion toasts.
+  - Atomic `{ current, past, future }` history stack with toolbar **`↶ Undo`** / **`↷ Redo`** buttons and `Ctrl/Cmd+Z`, `Ctrl/Cmd+Shift+Z`, and `Ctrl+Y` shortcuts.
   - Modal confirmation (`ConfirmDeleteModal`) before deleting a Term or Course; inline 2-click `Delete?` confirmation before deleting an Assessment Row.
   - Structured GitHub Issue templates (`.github/ISSUE_TEMPLATE/`) for bug reports and feature requests.
 - **Full In-Memory What-If Sandbox Isolation (Issue #4 / PR #5)**:
