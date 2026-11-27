@@ -1,5 +1,6 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { formatLastUpdated } from '../domain/calculations.js';
+import { useDialogFocus } from './useDialogFocus.js';
 
 function GoogleMark() {
   return (
@@ -42,6 +43,8 @@ export function CloudSyncModal({
   const [localError, setLocalError] = useState('');
   const [confirmingCloudDelete, setConfirmingCloudDelete] = useState(false);
   const [confirmingUnsyncedSignOut, setConfirmingUnsyncedSignOut] = useState(false);
+  const panelRef = useRef(null);
+  useDialogFocus(panelRef);
 
   const user = syncSnapshot?.user;
   const isSignedIn = Boolean(user);
@@ -90,6 +93,8 @@ export function CloudSyncModal({
   return (
     <div className="modal-backdrop" onClick={handleDismiss}>
       <div
+        ref={panelRef}
+        tabIndex={-1}
         className="modal-panel"
         style={{ maxWidth: '460px' }}
         role="dialog"
@@ -114,7 +119,7 @@ export function CloudSyncModal({
 
         <div className="modal-body">
           {(localError || syncSnapshot?.error) && (
-            <p style={{ color: 'var(--danger-fg)', fontWeight: 600 }}>
+            <p role="alert" style={{ color: 'var(--danger-fg)', fontWeight: 600 }}>
               {localError || syncSnapshot.error}
             </p>
           )}
@@ -311,6 +316,8 @@ export function SyncConflictModal({
 }) {
   const [busyChoice, setBusyChoice] = useState(null);
   const [localError, setLocalError] = useState('');
+  const panelRef = useRef(null);
+  useDialogFocus(panelRef);
 
   const reason = conflict?.reason || 'rev-mismatch';
   const isAccountSwitch = reason === 'account-switch';
@@ -357,6 +364,8 @@ export function SyncConflictModal({
   return (
     <div className="modal-backdrop" onClick={handleDismiss}>
       <div
+        ref={panelRef}
+        tabIndex={-1}
         className="modal-panel"
         style={{ maxWidth: '470px' }}
         role="alertdialog"

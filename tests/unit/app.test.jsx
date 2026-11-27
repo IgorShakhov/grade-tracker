@@ -1035,6 +1035,73 @@ describe('Grade Tracker React Application (M1 + M1.1 + Firebase Cloud Sync)', ()
       within(updatedEconSelect).getByRole('option', { name: 'Custom (88%)' }),
     ).toBeInTheDocument();
   });
+
+  it('traps Tab/Shift+Tab focus inside modals with initial Cancel focus and trigger restoration (#41), supports Arrow/F2 TermTabs, and restricts draggable to the ⋮⋮ handle (#50)', () => {
+    render(<App />);
+
+    // 1. Live toast status region is mounted from first render for reliable screen-reader announcements
+    expect(screen.getByRole('status')).toBeInTheDocument();
+
+    // 2. Course <section> is NOT draggable as a whole (#50); only its dedicated `.course-drag-handle` is draggable
+    const ecoSection = screen.getByRole('region', { name: 'Course ECON101' });
+    expect(ecoSection).not.toHaveAttribute('draggable');
+    const dragHandle = ecoSection.querySelector('.course-drag-handle');
+    expect(dragHandle).not.toBeNull();
+    expect(dragHandle).toHaveAttribute('draggable', 'true');
+
+    // Dragging handle 0 and dropping onto course 1 reorders courses cleanly
+    const mathSection = screen.getByRole('region', { name: 'Course MATH101' });
+    fireEvent.dragStart(dragHandle);
+    fireEvent.dragOver(mathSection);
+    fireEvent.drop(mathSection);
+    fireEvent.dragEnd(dragHandle);
+    const regionsAfterDrop = screen.getAllByRole('region', { name: /^Course /i });
+    expect(regionsAfterDrop[0]).toHaveAccessibleName('Course MATH101');
+    expect(regionsAfterDrop[1]).toHaveAccessibleName('Course ECON101');
+
+    // 3. ConfirmDeleteModal focuses Cancel initially, wraps Tab & Shift+Tab inside the dialog, and restores trigger focus on close (#41)
+    const deleteEcoBtn = screen.getByRole('button', { name: 'Delete ECON101' });
+    deleteEcoBtn.focus();
+    fireEvent.click(deleteEcoBtn);
+
+    const confirmDialog = screen.getByRole('alertdialog');
+    const closeBtn = within(confirmDialog).getByRole('button', { name: /Cancel deletion/i });
+    const cancelBtn = within(confirmDialog).getByRole('button', { name: /^Cancel$/i });
+    const confirmBtn = within(confirmDialog).getByRole('button', { name: /^Delete Course$/i });
+
+    expect(document.activeElement).toBe(cancelBtn);
+
+    // Tab from last focusable button wraps to first focusable button inside the modal
+    confirmBtn.focus();
+    fireEvent.keyDown(document, { key: 'Tab' });
+    expect(document.activeElement).toBe(closeBtn);
+
+    // Shift+Tab from first focusable button wraps back to last focusable button
+    fireEvent.keyDown(document, { key: 'Tab', shiftKey: true });
+    expect(document.activeElement).toBe(confirmBtn);
+
+    // Closing modal restores focus to the exact trigger button (`Delete ECON101`)
+    fireEvent.click(cancelBtn);
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+    expect(document.activeElement).toBe(deleteEcoBtn);
+
+    // 4. TermTabs tablist contains strictly role="tab" children and supports ArrowRight + F2 keyboard rename
+    fireEvent.click(screen.getByRole('button', { name: /\+ Add Term/i }));
+    const tablist = screen.getByRole('tablist', { name: /Academic Terms/i });
+    const tablistChildren = Array.from(tablist.children);
+    expect(tablistChildren.every((el) => el.getAttribute('role') === 'tab')).toBe(true);
+
+    const tabs = within(tablist).getAllByRole('tab');
+    expect(tabs[1]).toHaveAttribute('aria-selected', 'true');
+    fireEvent.keyDown(tabs[1], { key: 'ArrowRight' });
+    expect(tabs[0]).toHaveAttribute('aria-selected', 'true');
+
+    fireEvent.keyDown(tabs[0], { key: 'F2' });
+    const renameInput = screen.getByLabelText('Term name');
+    fireEvent.change(renameInput, { target: { value: 'Winter Term' } });
+    fireEvent.keyDown(renameInput, { key: 'Enter' });
+    expect(within(tablist).getByRole('tab', { name: 'Winter Term' })).toBeInTheDocument();
+  });
 });
 
 

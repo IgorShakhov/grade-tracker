@@ -81,10 +81,10 @@ Read this file and [`docs/ROADMAP.md`](docs/ROADMAP.md) first before modifying t
    - While `sandboxState !== null`, **all** mutations update **only** `sandboxState` — never calling `storageService.save()`, never triggering Firestore writes, and never pushing onto real Undo/Redo history.
    - Exiting What-If sets `sandboxState = null` (with `<CourseCard key={...-sim|live} />` remounting cleanly) so 100% of saved values revert immediately.
 
-4. **Destructive Action Safety**:
-   - Deleting a **Term** or **Course**, or replacing existing tracker courses via **Save Copy Locally** from a shared view, must open `ConfirmDeleteModal`.
-   - Deleting an **Assessment Row** uses inline 2-step confirmation (`×` → `Delete?`) inside `CourseCard.jsx`.
-   - Every confirmed deletion or local replacement pushes onto the Undo stack (restorable via the toolbar `↶ Undo` button or `Ctrl/Cmd+Z`) and shows a confirmation toast.
+4. **Destructive Action Safety & Modal Accessibility (`src/components/useDialogFocus.js`)**:
+   - Deleting a **Term** or **Course**, or replacing existing tracker courses via **Save Copy Locally** from a shared view, must open `ConfirmDeleteModal` (which focuses `Cancel` initially, traps `Tab`/`Shift+Tab`, marks background content `inert`, and restores trigger focus on close, as do all 5 modals via `useDialogFocus`).
+   - Deleting an **Assessment Row** uses inline 2-step confirmation (`×` → `Delete?`) inside `CourseCard.jsx`. Course card drag-and-drop uses a dedicated `⋮⋮` drag handle rather than whole-card `draggable` so text selection inside inputs is never intercepted (`#50`).
+   - Every confirmed deletion or local replacement pushes onto the Undo stack (restorable via the toolbar `↶ Undo` button or `Ctrl/Cmd+Z`) and shows a confirmation toast inside an always-mounted `role="status"` live region.
 
 5. **Firebase Google Sign-In, Firestore Rules & Security Invariants (`src/services/cloudSync.js`, `firestore.rules`)**:
    - **Auth Flow**: Always use `signInWithPopup` (never `signInWithRedirect`, which breaks on `github.io` vs `firebaseapp.com` due to browser third-party storage partitioning).

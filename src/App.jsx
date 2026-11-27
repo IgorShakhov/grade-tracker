@@ -1326,7 +1326,12 @@ export default function App() {
         />
 
         <div className="main-grid">
-          <div className="courses-column">
+          <div
+            id="active-term-tabpanel"
+            role="tabpanel"
+            aria-labelledby={activeTerm ? `term-tab-${activeTerm.id}` : undefined}
+            className="courses-column"
+          >
             {allCoursesInTerm.map((course, idx) => (
               <CourseCard
                 key={`${course.id}-${simMode ? `sim-${simEpoch}` : 'live'}`}
@@ -1599,11 +1604,18 @@ export default function App() {
           />
         )}
 
-      {toast && (
-        <div className="toast" role="status" aria-live="polite">
-          <span>{toast.text}</span>
-        </div>
-      )}
+      <div
+        className="toast-live-region"
+        role="status"
+        aria-live="polite"
+        aria-atomic="true"
+      >
+        {toast ? (
+          <div className="toast">
+            <span>{toast.text}</span>
+          </div>
+        ) : null}
+      </div>
     </div>
   );
 }
