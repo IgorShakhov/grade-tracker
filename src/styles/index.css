@@ -108,6 +108,14 @@ body {
   background: hsl(34, 64%, 23%);
 }
 
+.mode-banner.danger-banner {
+  background: hsl(356, 62%, 30%);
+}
+
+.mode-banner.recovery-banner {
+  background: hsl(28, 72%, 25%);
+}
+
 .mode-banner-inner {
   max-width: 1280px;
   margin: 0 auto;

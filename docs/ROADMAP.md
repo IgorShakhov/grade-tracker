@@ -16,7 +16,7 @@ This document tracks shipped milestones, upcoming features, and key technical de
   - Toggleable simulator mode to test hypothetical marks without overwriting saved grades.
   - Per-course target dropdown calculating the exact average needed across remaining ungraded syllabus weight (`secured`, `achievable`, or `unreachable`).
 - **Local-First Persistence & Sharing**:
-  - Automatic `localStorage` persistence via `StorageService` with strict schema validation.
+  - Automatic `localStorage` persistence via `StorageService` with strict schema validation, rolling raw corruption backups (`grade_tracker_v1_corrupt_<ts>`), partial course/category salvage, and `CURRENT_SCHEMA_VERSION` forward-compatibility gating (`SchemaTooNewError`).
   - Compressed URL-safe Read-Only Share Snapshot links (`#share=z1....` via `CompressionStream`).
 - **GitHub Pages CI/CD**: Automated test + Vite build + Pages deployment workflow (`.github/workflows/deploy.yml`).
 
@@ -41,7 +41,7 @@ This document tracks shipped milestones, upcoming features, and key technical de
   - Eliminates manual token generation, cross-device token copying, and 30-day token expiration while keeping zero user data in the public GitHub repository.
 - **Hardened Security & Multi-Device Concurrency (`firestore.rules`, `src/services/cloudSync.js`)**:
   - Owner-isolated `users/{uid}` documents (`allow list: if false`) enforcing exact schema keys, `< 300 KB` payload bounds, server-enforced commit timestamps (`updatedAt == request.time`), zero stored PII, and monotonic integer `rev` counters (`rev == 1` on create, `rev == resource.data.rev + 1` on update) with `SyncConflictModal` resolution (`initial-merge`, `rev-mismatch`, `account-switch`, and `remote-deleted`).
-  - Shared-computer safety: Firestore uses stateless `firebase/firestore/lite` (zero IndexedDB grade remnants on disk; Firebase Auth stores only the active OAuth session token in IndexedDB until Sign Out), Sign Out flushes pending edits before clearing local `grade_tracker_v1` + Undo/Redo history across tabs, and `lastSyncedUid` prevents accidental cross-account uploads.
+  - Shared-computer safety: Firestore uses stateless `firebase/firestore/lite` (zero IndexedDB grade remnants on disk; Firebase Auth stores only the active OAuth session token in IndexedDB until Sign Out), Sign Out flushes pending edits before clearing local `grade_tracker_v1` + Undo/Redo history across tabs, involuntary auth loss (`onAuthStateChanged(null)` while dirty) preserves `grade_tracker_v1_unsynced_backup` for next sign-in recovery, and `lastSyncedUid` prevents accidental cross-account uploads.
 - **Unified Sharing (`#view=<token>` Live Link + `#share=...` Snapshot)**:
   - Signed-in users can enable, rotate, or turn off a 192-bit `base64url` **Live Auto-Updating Link** (`#view=<token>` with `<meta name="referrer" content="no-referrer" />`) backed by `shares/{token}` and symmetrically bound 1-to-1 to `users/{uid}.shareToken` via `getAfter(...)` and `!existsAfter(...)` in a single atomic `writeBatch` (zero orphan share docs), alongside one-time compressed `#share=` snapshots.
 

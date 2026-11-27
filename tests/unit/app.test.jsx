@@ -903,6 +903,52 @@ describe('Grade Tracker React Application (M1 + M1.1 + Firebase Cloud Sync)', ()
       });
     }
   });
+
+  it('surfaces a corrupt-load recovery banner with Download Backup (#36) and pauses editing on SchemaTooNewError (#37)', async () => {
+    const { createInitialState } = await import('../../src/domain/templates.js');
+    const corrupt = createInitialState();
+    corrupt.studentName = 'Salvaged Student';
+    corrupt.terms[0].courses[0].units = 999; // invalid (>100), sibling courses survive
+    window.localStorage.setItem('grade_tracker_v1', JSON.stringify(corrupt));
+
+    const { unmount } = render(
+      <StrictMode>
+        <App />
+      </StrictMode>,
+    );
+    expect(screen.getByDisplayValue('Salvaged Student')).toBeInTheDocument();
+    expect(screen.queryByDisplayValue('ECON101')).not.toBeInTheDocument();
+    expect(screen.getByDisplayValue('MATH101')).toBeInTheDocument();
+
+    const recoveryAlert = screen.getByRole('alert');
+    expect(recoveryAlert).toHaveTextContent(/Recovered Saved Courses/i);
+    expect(
+      within(recoveryAlert).getByRole('button', { name: /Download Backup/i }),
+    ).toBeInTheDocument();
+    fireEvent.click(within(recoveryAlert).getByRole('button', { name: /Dismiss/i }));
+    expect(screen.queryByText(/Recovered Saved Courses/i)).not.toBeInTheDocument();
+    unmount();
+
+    // Now seed a v2 document in localStorage -> App shows App Update Required and locks inputs read-only without overwriting v2 data!
+    const rawV2 = JSON.stringify({ ...createInitialState(), version: 2 });
+    window.localStorage.setItem('grade_tracker_v1', rawV2);
+    try {
+      render(
+        <StrictMode>
+          <App />
+        </StrictMode>,
+      );
+      expect(screen.getByRole('alert')).toHaveTextContent(/App Update Required/i);
+      expect(screen.getByLabelText('Tracker owner or label')).toBeDisabled();
+      // Collapsing a course works cleanly in-memory without touching localStorage
+      fireEvent.click(screen.getByRole('button', { name: 'Collapse ECON101' }));
+      expect(screen.getByRole('button', { name: 'Expand ECON101' })).toBeInTheDocument();
+      expect(window.localStorage.getItem('grade_tracker_v1')).toBe(rawV2);
+    } finally {
+      window.localStorage.clear();
+      storageService.load();
+    }
+  });
 });
 
 

@@ -4,10 +4,14 @@ import {
   storageService,
   validateTrackerState,
   createMemoryStorage,
+  CURRENT_SCHEMA_VERSION,
+  SchemaTooNewError,
+  isSchemaTooNewError,
 } from './storage.js';
 import { getFirebaseServices } from './firebase.js';
 
 export const SYNC_META_KEY = 'grade_tracker_sync_meta_v1';
+export const UNSYNCED_BACKUP_KEY = 'grade_tracker_v1_unsynced_backup';
 export const LEGACY_GITHUB_SYNC_KEY = 'grade_tracker_cloud_sync_v1';
 export const SHARE_TOKEN_REGEX = /^[A-Za-z0-9_-]{22,64}$/;
 export const MAX_STATE_JSON_CHARS = 290_000;
@@ -308,11 +312,20 @@ export async function fetchSharedView(shareToken, firebaseFactory = getFirebaseS
     throw new Error('Shared tracker data is malformed.');
   }
   const parsed = JSON.parse(data.stateJson);
-  const validated = validateTrackerState(parsed);
-  return {
-    exists: true,
-    state: validated,
-  };
+  try {
+    const validated = validateTrackerState(parsed);
+    return {
+      exists: true,
+      state: validated,
+    };
+  } catch (err) {
+    if (isSchemaTooNewError(err)) {
+      throw new Error(
+        'This shared tracker uses a newer Grade Tracker format. Reload the page to view it.',
+      );
+    }
+    throw err;
+  }
 }
 
 /**
@@ -335,6 +348,8 @@ export class CloudSyncManager {
     this.currentUser = null;
     this.error = null;
     this.conflict = null;
+    this.schemaTooNew = false;
+    this.explicitSignOutInProgress = false;
     this.listeners = new Set();
 
     this.debounceTimer = null;
@@ -358,6 +373,68 @@ export class CloudSyncManager {
     // Clean up any obsolete GitHub token sync entry from earlier milestone versions
     try {
       this.storage.removeItem(LEGACY_GITHUB_SYNC_KEY);
+    } catch {
+      // Ignore storage errors
+    }
+  }
+
+  isSchemaBlocked() {
+    return Boolean(this.schemaTooNew || this.storageSvc?.schemaTooNew);
+  }
+
+  enterSchemaTooNewState(err) {
+    this.cancelDebounce();
+    this.queuedFlushAfterFlight = false;
+    this.schemaTooNew = true;
+    this.conflict = null;
+    this.status = 'error';
+    this.error =
+      err?.message ||
+      'App update required — reload the page to load newer cloud data safely.';
+    this.emit();
+  }
+
+  saveUnsyncedBackup(uid, state) {
+    if (!uid || !state) return;
+    try {
+      const validated = validateTrackerState(state);
+      this.storage.setItem(
+        UNSYNCED_BACKUP_KEY,
+        JSON.stringify({
+          uid,
+          savedAt: new Date().toISOString(),
+          state: validated,
+        }),
+      );
+    } catch {
+      // Ignore storage quota or validation errors on backup
+    }
+  }
+
+  getUnsyncedBackup() {
+    try {
+      const raw = this.storage.getItem(UNSYNCED_BACKUP_KEY);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed.uid !== 'string' || !parsed.state) {
+        return null;
+      }
+      return {
+        uid: parsed.uid,
+        savedAt: typeof parsed.savedAt === 'string' ? parsed.savedAt : null,
+        state: validateTrackerState(parsed.state),
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  clearUnsyncedBackupForUid(uid) {
+    try {
+      const existing = this.getUnsyncedBackup();
+      if (existing && (!uid || existing.uid === uid)) {
+        this.storage.removeItem(UNSYNCED_BACKUP_KEY);
+      }
     } catch {
       // Ignore storage errors
     }
@@ -419,6 +496,7 @@ export class CloudSyncManager {
       rev: this.meta.lastSyncedRev,
       dirty: this.meta.dirty,
       error: this.error,
+      schemaTooNew: this.isSchemaBlocked(),
       conflict: this.conflict
         ? {
             ...this.conflict,
@@ -573,6 +651,10 @@ export class CloudSyncManager {
     if (event.key === trackerKey) {
       const prevLocal = this.latestLocalState;
       const reloaded = this.storageSvc.load();
+      if (this.storageSvc?.schemaTooNew) {
+        this.enterSchemaTooNewState(this.storageSvc.schemaTooNewError);
+        return;
+      }
       this.latestLocalState = reloaded;
       if (
         event.newValue === null ||
@@ -601,14 +683,19 @@ export class CloudSyncManager {
   }
 
   resetLocalTrackerClean() {
+    this.lastSyncedStateSnapshot = null;
+    if (typeof this.storageSvc?.resetClean === 'function') {
+      const fresh = this.storageSvc.resetClean();
+      this.latestLocalState = fresh;
+      return fresh;
+    }
     try {
-      this.storage.removeItem(STORAGE_KEY);
+      this.storage.removeItem(this.storageSvc?.storageKey || STORAGE_KEY);
     } catch {
       // Ignore
     }
     const fresh = createInitialState();
     this.latestLocalState = fresh;
-    this.lastSyncedStateSnapshot = null;
     this.storageSvc.saveLocalOnly(fresh);
     this.storageSvc.notify(fresh);
     return fresh;
@@ -634,6 +721,10 @@ export class CloudSyncManager {
    * Invoked automatically whenever the user saves an edit through `storageService.save(...)`.
    */
   handleLocalStateSaved(nextState) {
+    if (this.isSchemaBlocked()) {
+      return Promise.resolve();
+    }
+
     if (
       !this.meta.dirty &&
       this.currentUser &&
@@ -683,6 +774,37 @@ export class CloudSyncManager {
 
     if (!sanitized) {
       const wasSignedIn = Boolean(this.currentUser);
+      const previousUid = this.currentUser?.uid || this.meta.lastSyncedUid;
+      const persistedMetaRaw = (() => {
+        try {
+          return this.storage.getItem(SYNC_META_KEY);
+        } catch {
+          return null;
+        }
+      })();
+      const persistedMeta = persistedMetaRaw ? this.loadMeta() : null;
+      const rawStoredTracker = (() => {
+        try {
+          return this.storage.getItem(this.storageSvc?.storageKey || STORAGE_KEY);
+        } catch {
+          return null;
+        }
+      })();
+      // If another tab already wiped SYNC_META_KEY on explicit Sign Out, do NOT create a backup (#3)
+      const shouldBackupUnsynced =
+        wasSignedIn &&
+        !this.explicitSignOutInProgress &&
+        !this.isSchemaBlocked() &&
+        rawStoredTracker !== null &&
+        ((persistedMeta && persistedMeta.dirty) ||
+          (persistedMetaRaw === null &&
+            this.meta.dirty &&
+            !this.usesBrowserLocalStorage) ||
+          (!this.meta.lastSyncedUid && this.hasUnreconciledCustomLocalCourses()));
+      const stateForBackup = shouldBackupUnsynced
+        ? this.latestLocalState || this.storageSvc.load()
+        : null;
+
       this.authEpoch += 1;
       this.reconcilingUid = null;
       this.reconcilePromise = null;
@@ -691,8 +813,12 @@ export class CloudSyncManager {
       this.currentUser = null;
       this.conflict = null;
       this.error = null;
+      this.schemaTooNew = false;
       this.status = 'disconnected';
       if (wasSignedIn) {
+        if (shouldBackupUnsynced && previousUid && stateForBackup) {
+          this.saveUnsyncedBackup(previousUid, stateForBackup);
+        }
         this.clearMeta();
         this.resetLocalTrackerClean();
       }
@@ -735,9 +861,15 @@ export class CloudSyncManager {
 
   /**
    * Reconciles cloud vs. local tracker on sign-in while strictly preventing
-   * cross-account localStorage bleed (`E2`) and stale overwrites (`R4`).
+   * cross-account localStorage bleed (`E2`), stale overwrites (`R4`), and
+   * newer-schema stripping (`#37`).
    */
   async reconcileOnSignIn(uid, expectedEpoch = this.authEpoch) {
+    if (this.storageSvc?.schemaTooNew) {
+      this.enterSchemaTooNewState(this.storageSvc.schemaTooNewError);
+      return;
+    }
+
     this.status = 'syncing';
     this.conflict = null;
     this.error = null;
@@ -767,7 +899,33 @@ export class CloudSyncManager {
         }
       }
 
-      const localState = this.latestLocalState || this.storageSvc.load();
+      let localState = this.latestLocalState || this.storageSvc.load();
+      let hadRecoveredBackup = false;
+      const unsyncedBackup = this.getUnsyncedBackup();
+      if (unsyncedBackup && unsyncedBackup.uid === uid) {
+        const hasPostSignOutLocalEdits =
+          !this.meta.lastSyncedUid &&
+          !areTrackerStatesEquivalent(localState, createInitialState());
+        if (!hasPostSignOutLocalEdits) {
+          localState = unsyncedBackup.state;
+          hadRecoveredBackup = true;
+          this.latestLocalState = localState;
+          this.storageSvc.saveLocalOnly(localState);
+          this.storageSvc.notify(localState);
+          // Clear any different-account meta marker since this backup is verified as `uid`'s own,
+          // and keep UNSYNCED_BACKUP_KEY intact until sync/conflict resolution completes!
+          this.saveMeta({
+            lastSyncedUid:
+              this.meta.lastSyncedUid === uid ? uid : null,
+            lastSyncedRev:
+              this.meta.lastSyncedUid === uid ? this.meta.lastSyncedRev : 0,
+            shareToken:
+              this.meta.lastSyncedUid === uid ? this.meta.shareToken : null,
+            dirty: true,
+          });
+        }
+      }
+
       const { lastSyncedUid, lastSyncedRev, dirty } = this.meta;
       const isDifferentPreviousOwner =
         Boolean(lastSyncedUid) && lastSyncedUid !== uid;
@@ -802,6 +960,7 @@ export class CloudSyncManager {
             dirty: false,
           });
           this.applyRemoteStateLocally(remoteState);
+          this.clearUnsyncedBackupForUid(uid);
           this.status = 'synced';
           this.emit();
           return;
@@ -809,10 +968,9 @@ export class CloudSyncManager {
 
         // Case B: Never synced on this browser before (`lastSyncedUid === null`)
         if (!lastSyncedUid) {
-          const hasCustomLocalData = !areTrackerStatesEquivalent(
-            localState,
-            createInitialState(),
-          );
+          const hasCustomLocalData =
+            hadRecoveredBackup ||
+            !areTrackerStatesEquivalent(localState, createInitialState());
           const differsFromRemote = !areTrackerStatesEquivalent(
             localState,
             remoteState,
@@ -821,7 +979,7 @@ export class CloudSyncManager {
           if (hasCustomLocalData && differsFromRemote) {
             this.status = 'conflict';
             this.conflict = {
-              reason: 'initial-merge',
+              reason: hadRecoveredBackup ? 'rev-mismatch' : 'initial-merge',
               remoteState,
               remoteRev,
               remoteShareToken,
@@ -837,13 +995,14 @@ export class CloudSyncManager {
             dirty: false,
           });
           this.applyRemoteStateLocally(remoteState);
+          this.clearUnsyncedBackupForUid(uid);
           this.status = 'synced';
           this.emit();
           return;
         }
 
         // Case C: Returning same user (`lastSyncedUid === uid`)
-        if (dirty) {
+        if (dirty || hadRecoveredBackup) {
           if (lastSyncedRev === remoteRev) {
             this.saveMeta({
               lastSyncedUid: uid,
@@ -878,6 +1037,7 @@ export class CloudSyncManager {
         if (!sameAsRemote) {
           this.applyRemoteStateLocally(remoteState);
         }
+        this.clearUnsyncedBackupForUid(uid);
         this.status = 'synced';
         this.emit();
         return;
@@ -920,6 +1080,10 @@ export class CloudSyncManager {
       await this.pushStateToCloud(localState);
     } catch (err) {
       if (expectedEpoch === this.authEpoch && this.currentUser?.uid === uid) {
+        if (isSchemaTooNewError(err)) {
+          this.enterSchemaTooNewState(err);
+          return;
+        }
         if (isBrowserOffline() || err?.code === 'unavailable') {
           this.status = 'offline';
           this.error = null;
@@ -983,7 +1147,7 @@ export class CloudSyncManager {
    */
   async signOutUser({ forceDiscard = false } = {}) {
     await Promise.resolve();
-    if (!forceDiscard && this.currentUser) {
+    if (!forceDiscard && this.currentUser && !this.isSchemaBlocked()) {
       if (this.reconcilePromise) {
         await this.reconcilePromise.catch(() => {});
       }
@@ -1012,6 +1176,7 @@ export class CloudSyncManager {
 
       if (
         this.currentUser &&
+        !this.isSchemaBlocked() &&
         (this.meta.dirty ||
           this.status === 'conflict' ||
           this.hasUnreconciledCustomLocalCourses())
@@ -1020,6 +1185,7 @@ export class CloudSyncManager {
       }
     }
 
+    const signingOutUid = this.currentUser?.uid || this.meta.lastSyncedUid;
     this.authEpoch += 1;
     this.reconcilingUid = null;
     this.reconcilePromise = null;
@@ -1030,15 +1196,29 @@ export class CloudSyncManager {
       await this.inFlightPromise.catch(() => {});
     }
 
+    // Wipe metadata, unsynced backup, and local tracker BEFORE signOutAuth() as well as in finally
+    // so sibling tabs receiving onAuthStateChanged(null) never write UNSYNCED_BACKUP_KEY on explicit Sign Out (#3)
+    if (signingOutUid) {
+      this.clearUnsyncedBackupForUid(signingOutUid);
+    }
+    this.clearMeta();
+    this.resetLocalTrackerClean();
+
+    this.explicitSignOutInProgress = true;
     const fb = this.firebaseFactory();
     try {
       await fb.signOutAuth();
     } finally {
+      this.explicitSignOutInProgress = false;
       this.authEpoch += 1;
       this.currentUser = null;
       this.conflict = null;
       this.error = null;
+      this.schemaTooNew = false;
       this.status = 'disconnected';
+      if (signingOutUid) {
+        this.clearUnsyncedBackupForUid(signingOutUid);
+      }
       this.clearMeta();
       this.resetLocalTrackerClean();
       this.emit();
@@ -1048,10 +1228,13 @@ export class CloudSyncManager {
 
   async flushPendingSave() {
     await Promise.resolve();
+    if (this.isSchemaBlocked()) {
+      return;
+    }
     if (this.reconcilePromise) {
       await this.reconcilePromise.catch(() => {});
     }
-    if (!this.currentUser || this.status === 'conflict') {
+    if (!this.currentUser || this.status === 'conflict' || this.isSchemaBlocked()) {
       return;
     }
     if (this.meta.lastSyncedUid !== this.currentUser.uid) {
@@ -1067,7 +1250,7 @@ export class CloudSyncManager {
     rawState,
     { pushedSeq = this.localMutationSeq, resolvingConflict = false } = {},
   ) {
-    if (!this.currentUser) return;
+    if (!this.currentUser || this.isSchemaBlocked()) return;
 
     if (this.inFlightPromise) {
       this.queuedFlushAfterFlight = true;
@@ -1083,7 +1266,7 @@ export class CloudSyncManager {
     const startEpoch = this.authEpoch;
 
     const run = async () => {
-      if (!this.isSessionCurrent(uid, startEpoch)) return;
+      if (!this.isSessionCurrent(uid, startEpoch) || this.isSchemaBlocked()) return;
       if (!resolvingConflict) {
         this.status = 'syncing';
         this.error = null;
@@ -1133,6 +1316,9 @@ export class CloudSyncManager {
           dirty: hasNewerLocalEdits,
         });
         this.conflict = null;
+        if (!hasNewerLocalEdits) {
+          this.clearUnsyncedBackupForUid(uid);
+        }
         this.status = hasNewerLocalEdits
           ? isBrowserOffline()
             ? 'offline'
@@ -1145,6 +1331,10 @@ export class CloudSyncManager {
         }
       } catch (err) {
         if (!this.isSessionCurrent(uid, startEpoch)) return;
+        if (isSchemaTooNewError(err)) {
+          this.enterSchemaTooNewState(err);
+          return;
+        }
         if (err?.code === 'permission-denied') {
           const fb = this.firebaseFactory();
           const snap = await fb.getDoc(fb.doc('users', uid));
@@ -1158,7 +1348,16 @@ export class CloudSyncManager {
             const remoteShareToken = isValidShareToken(data.shareToken)
               ? data.shareToken.trim()
               : null;
-            const remoteState = validateTrackerState(JSON.parse(data.stateJson));
+            let remoteState;
+            try {
+              remoteState = validateTrackerState(JSON.parse(data.stateJson));
+            } catch (parseErr) {
+              if (isSchemaTooNewError(parseErr)) {
+                this.enterSchemaTooNewState(parseErr);
+                return;
+              }
+              throw parseErr;
+            }
             const currentLocal = this.latestLocalState || this.storageSvc.load();
 
             if (areTrackerStatesEquivalent(currentLocal, remoteState)) {
@@ -1172,6 +1371,9 @@ export class CloudSyncManager {
                 dirty: hasNewerLocalEdits,
               });
               this.conflict = null;
+              if (!hasNewerLocalEdits) {
+                this.clearUnsyncedBackupForUid(uid);
+              }
               this.status = hasNewerLocalEdits
                 ? isBrowserOffline()
                   ? 'offline'
@@ -1237,7 +1439,8 @@ export class CloudSyncManager {
       if (
         this.queuedFlushAfterFlight &&
         this.isSessionCurrent(uid, startEpoch) &&
-        this.status !== 'conflict'
+        this.status !== 'conflict' &&
+        !this.isSchemaBlocked()
       ) {
         this.queuedFlushAfterFlight = false;
         const nextSeq = this.localMutationSeq;
@@ -1256,6 +1459,9 @@ export class CloudSyncManager {
     await Promise.resolve();
     if (!this.currentUser) return null;
     this.cancelDebounce();
+    if (this.isSchemaBlocked()) {
+      return this.getSnapshot();
+    }
     if (currentLocalState && !this.latestLocalState) {
       this.latestLocalState = currentLocalState;
     }
@@ -1266,7 +1472,7 @@ export class CloudSyncManager {
     if (this.inFlightPromise) {
       await this.inFlightPromise.catch(() => {});
     }
-    if (!this.currentUser || this.status === 'conflict') {
+    if (!this.currentUser || this.status === 'conflict' || this.isSchemaBlocked()) {
       return this.getSnapshot();
     }
 
@@ -1355,12 +1561,17 @@ export class CloudSyncManager {
       if (revChanged && !sameAsRemote) {
         this.applyRemoteStateLocally(remoteState);
       }
+      this.clearUnsyncedBackupForUid(uid);
       this.conflict = null;
       this.status = 'synced';
       this.emit();
       return this.getSnapshot();
     } catch (err) {
       if (!this.isSessionCurrent(uid, startEpoch)) {
+        return this.getSnapshot();
+      }
+      if (isSchemaTooNewError(err)) {
+        this.enterSchemaTooNewState(err);
         return this.getSnapshot();
       }
       if (isBrowserOffline() || err?.code === 'unavailable') {
@@ -1383,7 +1594,7 @@ export class CloudSyncManager {
     while (this.inFlightPromise) {
       await this.inFlightPromise.catch(() => {});
     }
-    if (!this.currentUser || !this.conflict) {
+    if (!this.currentUser || !this.conflict || this.isSchemaBlocked()) {
       return this.getSnapshot();
     }
     const uid = this.currentUser.uid;
@@ -1406,6 +1617,7 @@ export class CloudSyncManager {
           dirty: false,
         });
         this.applyRemoteStateLocally(activeConflict.remoteState);
+        this.clearUnsyncedBackupForUid(uid);
         this.status = 'synced';
         this.error = null;
         this.emit();
@@ -1488,6 +1700,12 @@ export class CloudSyncManager {
     if (!this.currentUser) {
       throw new Error('Sign in with Google first to enable a live share link.');
     }
+    if (this.isSchemaBlocked()) {
+      throw new SchemaTooNewError(
+        CURRENT_SCHEMA_VERSION + 1,
+        CURRENT_SCHEMA_VERSION,
+      );
+    }
     this.cancelDebounce();
     if (this.reconcilePromise) {
       await this.reconcilePromise;
@@ -1497,6 +1715,12 @@ export class CloudSyncManager {
     }
     if (!this.currentUser) {
       throw new Error('Sign in with Google first to enable a live share link.');
+    }
+    if (this.isSchemaBlocked()) {
+      throw new SchemaTooNewError(
+        CURRENT_SCHEMA_VERSION + 1,
+        CURRENT_SCHEMA_VERSION,
+      );
     }
 
     const uid = this.currentUser.uid;
@@ -1523,7 +1747,15 @@ export class CloudSyncManager {
         const data = userSnap.data() || {};
         baseRev = typeof data.rev === 'number' && Number.isInteger(data.rev) ? data.rev : 0;
         oldToken = isValidShareToken(data.shareToken) ? data.shareToken.trim() : null;
-        const remoteState = validateTrackerState(JSON.parse(data.stateJson));
+        let remoteState;
+        try {
+          remoteState = validateTrackerState(JSON.parse(data.stateJson));
+        } catch (err) {
+          if (isSchemaTooNewError(err)) {
+            this.enterSchemaTooNewState(err);
+          }
+          throw err;
+        }
 
         if ((this.meta.lastSyncedRev || 0) !== baseRev) {
           const sameAsRemote = areTrackerStatesEquivalent(
@@ -1637,7 +1869,8 @@ export class CloudSyncManager {
       if (
         this.queuedFlushAfterFlight &&
         this.isSessionCurrent(uid, startEpoch) &&
-        this.status !== 'conflict'
+        this.status !== 'conflict' &&
+        !this.isSchemaBlocked()
       ) {
         this.queuedFlushAfterFlight = false;
         const nextSeq = this.localMutationSeq;
@@ -1658,6 +1891,12 @@ export class CloudSyncManager {
     if (!this.currentUser) {
       throw new Error('Not signed in.');
     }
+    if (this.isSchemaBlocked()) {
+      throw new SchemaTooNewError(
+        CURRENT_SCHEMA_VERSION + 1,
+        CURRENT_SCHEMA_VERSION,
+      );
+    }
     this.cancelDebounce();
     if (this.reconcilePromise) {
       await this.reconcilePromise;
@@ -1667,6 +1906,12 @@ export class CloudSyncManager {
     }
     if (!this.currentUser) {
       throw new Error('Not signed in.');
+    }
+    if (this.isSchemaBlocked()) {
+      throw new SchemaTooNewError(
+        CURRENT_SCHEMA_VERSION + 1,
+        CURRENT_SCHEMA_VERSION,
+      );
     }
 
     const uid = this.currentUser.uid;
@@ -1707,7 +1952,15 @@ export class CloudSyncManager {
       const oldToken = isValidShareToken(data.shareToken)
         ? data.shareToken.trim()
         : this.meta.shareToken;
-      const remoteState = validateTrackerState(JSON.parse(data.stateJson));
+      let remoteState;
+      try {
+        remoteState = validateTrackerState(JSON.parse(data.stateJson));
+      } catch (err) {
+        if (isSchemaTooNewError(err)) {
+          this.enterSchemaTooNewState(err);
+        }
+        throw err;
+      }
 
       if ((this.meta.lastSyncedRev || 0) !== baseRev) {
         const sameAsRemote = areTrackerStatesEquivalent(
@@ -1794,7 +2047,8 @@ export class CloudSyncManager {
       if (
         this.queuedFlushAfterFlight &&
         this.isSessionCurrent(uid, startEpoch) &&
-        this.status !== 'conflict'
+        this.status !== 'conflict' &&
+        !this.isSchemaBlocked()
       ) {
         this.queuedFlushAfterFlight = false;
         const nextSeq = this.localMutationSeq;

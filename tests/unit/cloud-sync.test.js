@@ -1180,5 +1180,119 @@ describe('CloudSyncManager & Firestore Security Rules Invariants (cloudSync.js)'
     unsub();
     mgr.stop();
   });
+
+  it('refuses to overwrite or commit writeBatch when remote Firestore document has newer schema version (#37)', async () => {
+    const fbMock = createRulesEnforcingFirebaseMock();
+    const mem = createMemoryStorage();
+    const storageSvc = new StorageService({ storage: mem });
+    let batchCommitCalls = 0;
+    const origWriteBatch = fbMock.service.writeBatch;
+    const trackedFbService = {
+      ...fbMock.service,
+      writeBatch: () => {
+        const b = origWriteBatch();
+        const origCommit = b.commit.bind(b);
+        return {
+          ...b,
+          commit: async () => {
+            batchCommitCalls += 1;
+            return origCommit();
+          },
+        };
+      },
+    };
+
+    const mgr = new CloudSyncManager({
+      firebaseFactory: () => trackedFbService,
+      storage: mem,
+      storageSvc,
+      debounceMs: 10,
+    });
+    mgr.start();
+
+    fbMock.setPopupUser({ uid: 'user-v2', email: 'v2@example.com' });
+    await mgr.signInWithGoogle();
+    expect(batchCommitCalls).toBe(1);
+
+    // Newer client writes schema version 2 with sub-assessments field to Firestore
+    const futureRemote = {
+      ...createInitialState(),
+      version: 2,
+      studentName: 'Future Schema',
+      subAssessmentsV2: { enabled: true },
+    };
+    const rawFutureJson = JSON.stringify(futureRemote);
+    fbMock.seedDirect('users/user-v2', {
+      stateJson: rawFutureJson,
+      updatedAt: 'ts-v2',
+      rev: 2,
+      shareToken: null,
+    });
+
+    // Stale v1 client has dirty local edit and runs syncNow -> must NOT commit stripped state!
+    mgr.saveMeta({ dirty: true });
+    batchCommitCalls = 0;
+    const snap = await mgr.syncNow(storageSvc.load());
+    expect(batchCommitCalls).toBe(0);
+    expect(snap.status).toBe('error');
+    expect(snap.schemaTooNew).toBe(true);
+    expect(fbMock.docs.get('users/user-v2').stateJson).toBe(rawFutureJson);
+
+    // Subsequent local saves while schemaBlocked must also never push to Firestore
+    await mgr.handleLocalStateSaved(storageSvc.load());
+    await new Promise((r) => setTimeout(r, 25));
+    expect(batchCommitCalls).toBe(0);
+
+    mgr.stop();
+  });
+
+  it('saves grade_tracker_v1_unsynced_backup before involuntary onAuthStateChanged(null) wipes dirty edits and offers recovery on next sign-in (#46)', async () => {
+    const { UNSYNCED_BACKUP_KEY } = await import('../../src/services/cloudSync.js');
+    const fbMock = createRulesEnforcingFirebaseMock();
+    const mem = createMemoryStorage();
+    const storageSvc = new StorageService({ storage: mem });
+    const mgr = new CloudSyncManager({
+      firebaseFactory: () => fbMock.service,
+      storage: mem,
+      storageSvc,
+      debounceMs: 5000,
+    });
+    mgr.start();
+
+    fbMock.setPopupUser({ uid: 'user-loss', email: 'loss@example.com' });
+    await mgr.signInWithGoogle();
+    expect(mgr.getSnapshot().status).toBe('synced');
+
+    // User makes an offline/debounced edit (`dirty: true`), then refresh token is revoked (`emitAuth(null)`)
+    const edited = storageSvc.load();
+    edited.studentName = 'Offline Unsynced Work';
+    storageSvc.save(edited);
+    await Promise.resolve();
+    expect(mgr.getSnapshot().dirty).toBe(true);
+
+    fbMock.emitAuth(null);
+    await new Promise((r) => setTimeout(r, 10));
+
+    // Active localStorage is wiped for shared-computer privacy, while UNSYNCED_BACKUP_KEY preserves the dirty edits!
+    expect(storageSvc.load().studentName).toBe('My');
+    const rawBackup = mem.getItem(UNSYNCED_BACKUP_KEY);
+    expect(rawBackup).toBeTruthy();
+    const parsedBackup = JSON.parse(rawBackup);
+    expect(parsedBackup.uid).toBe('user-loss');
+    expect(parsedBackup.state.studentName).toBe('Offline Unsynced Work');
+
+    // Signing back in as the same user restores the unsynced backup and prompts conflict merge against cloud
+    fbMock.setPopupUser({ uid: 'user-loss', email: 'loss@example.com' });
+    await mgr.signInWithGoogle();
+    expect(mgr.getSnapshot().status).toBe('conflict');
+    expect(storageSvc.load().studentName).toBe('Offline Unsynced Work');
+    // Backup stays intact while conflict is unresolved, then clears once synced
+    expect(mem.getItem(UNSYNCED_BACKUP_KEY)).not.toBeNull();
+    await mgr.resolveConflict('keep-local');
+    expect(mgr.getSnapshot().status).toBe('synced');
+    expect(mem.getItem(UNSYNCED_BACKUP_KEY)).toBeNull();
+
+    mgr.stop();
+  });
 });
 
