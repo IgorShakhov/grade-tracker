@@ -239,6 +239,12 @@ function createRulesEnforcingFirebaseMock(sharedDocs = new Map()) {
                       'shares delete requires existing doc owned by caller',
                     );
                   }
+                  const afterUser = afterDocs.get(`users/${currentAuthUser.uid}`);
+                  if (afterUser && (afterUser.shareToken ?? null) === id) {
+                    throw permissionDenied(
+                      'shares delete cannot leave users/{uid}.shareToken dangling at deleted token',
+                    );
+                  }
                   continue;
                 }
                 if (!validToken(id)) {
@@ -1294,5 +1300,109 @@ describe('CloudSyncManager & Firestore Security Rules Invariants (cloudSync.js)'
 
     mgr.stop();
   });
-});
 
+  it('defers loading Firebase SDK on start() for local-only users while restoring returning sessions (#48)', async () => {
+    const {
+      isFirebaseModulePreloaded,
+      resetFirebasePreloadForTests,
+    } = await import('../../src/services/cloudSync.js');
+
+    resetFirebasePreloadForTests();
+    expect(isFirebaseModulePreloaded()).toBe(false);
+
+    // 1. Fresh local-only user (`lastSyncedUid: null`, no unsynced backup) -> does NOT load Firebase on start() or local saves
+    const memLocal = createMemoryStorage();
+    const localSvc = new StorageService({ storage: memLocal });
+    const localMgr = new CloudSyncManager({
+      storage: memLocal,
+      storageSvc: localSvc,
+    });
+    localMgr.start();
+    expect(isFirebaseModulePreloaded()).toBe(false);
+
+    const edited = localSvc.load();
+    edited.studentName = 'Purely Local User';
+    localSvc.save(edited);
+    await Promise.resolve();
+    expect(isFirebaseModulePreloaded()).toBe(false);
+
+    // Opening CloudSyncModal calls prepareSignIn() -> pre-warms Firebase + Auth observer cleanly without throwing when unconfigured
+    await localMgr.prepareSignIn();
+    expect(isFirebaseModulePreloaded()).toBe(true);
+    expect(localMgr.getSnapshot().error).toBeNull();
+    localMgr.stop();
+    resetFirebasePreloadForTests();
+
+    // 2. Returning signed-in user (`lastSyncedUid` present in SYNC_META_KEY) -> eagerly loads Firebase on start() to restore session
+    const memReturning = createMemoryStorage();
+    memReturning.setItem(
+      SYNC_META_KEY,
+      JSON.stringify({
+        lastSyncedUid: 'returning-uid',
+        lastSyncedRev: 2,
+        lastSyncedAt: '2026-11-27T00:00:00.000Z',
+        shareToken: null,
+        dirty: false,
+      }),
+    );
+    const returningSvc = new StorageService({ storage: memReturning });
+    const returningMgr = new CloudSyncManager({
+      storage: memReturning,
+      storageSvc: returningSvc,
+    });
+    returningMgr.start();
+    expect(isFirebaseModulePreloaded()).toBe(true);
+    if (returningMgr.authAttachPromise) {
+      await returningMgr.authAttachPromise.catch(() => null);
+    }
+    returningMgr.stop();
+
+    // 3. Async dynamic factory resolves cleanly on signInWithGoogle()
+    const fbMock = createRulesEnforcingFirebaseMock();
+    const memAsync = createMemoryStorage();
+    const asyncSvc = new StorageService({ storage: memAsync });
+    const asyncMgr = new CloudSyncManager({
+      firebaseFactory: async () => fbMock.service,
+      storage: memAsync,
+      storageSvc: asyncSvc,
+    });
+    asyncMgr.start();
+    fbMock.setPopupUser({ uid: 'async-user', email: 'async@example.com' });
+    const snap = await asyncMgr.signInWithGoogle();
+    expect(snap.status).toBe('synced');
+    expect(snap.user?.uid).toBe('async-user');
+    asyncMgr.stop();
+  });
+
+  it('rejects standalone deletion of shares/{token} while users/{uid}.shareToken still references token (#49)', async () => {
+    const fbMock = createRulesEnforcingFirebaseMock();
+    const mem = createMemoryStorage();
+    const storageSvc = new StorageService({ storage: mem });
+    const mgr = new CloudSyncManager({
+      firebaseFactory: () => fbMock.service,
+      storage: mem,
+      storageSvc,
+    });
+    mgr.start();
+
+    fbMock.setPopupUser({ uid: 'user-sym', email: 'sym@example.com' });
+    await mgr.signInWithGoogle();
+    const activeToken = await mgr.enableOrRotateShare(storageSvc.load());
+    expect(fbMock.docs.has(`shares/${activeToken}`)).toBe(true);
+
+    // Deleting shares/{activeToken} alone leaves a dangling users/{uid}.shareToken and MUST be rejected
+    const loneDeleteBatch = fbMock.service.writeBatch();
+    loneDeleteBatch.delete(fbMock.service.doc('shares', activeToken));
+    await expect(loneDeleteBatch.commit()).rejects.toMatchObject({
+      code: 'permission-denied',
+    });
+    expect(fbMock.docs.has(`shares/${activeToken}`)).toBe(true);
+
+    // Atomic disableShare clears users/{uid}.shareToken and deletes shares/{activeToken} together -> allowed
+    await mgr.disableShare(storageSvc.load());
+    expect(fbMock.docs.has(`shares/${activeToken}`)).toBe(false);
+    expect(fbMock.docs.get('users/user-sym').shareToken).toBeNull();
+
+    mgr.stop();
+  });
+});

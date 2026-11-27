@@ -264,6 +264,12 @@ export function lookupGrade(percentage, gradeScale = DEFAULT_GRADE_SCALE) {
   };
 }
 
+/**
+ * Note (#51): All standard Grade Tracker inputs (`0..1000` weights/grades, `0.25..100` units)
+ * take the direct `O(n)` IEEE-754 fast paths below with zero extra allocation or log math;
+ * `logSumExp2` and `computeScaledWeightedMean` are retained as cold-path fallbacks so direct
+ * programmatic callers passing extreme subnormal/near-MAX_VALUE doubles remain NaN/Infinity-free.
+ */
 function logSumExp2(logs) {
   if (logs.length === 0) return -Infinity;
   let maxLog = -Infinity;
