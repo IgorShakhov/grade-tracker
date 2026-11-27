@@ -6,6 +6,7 @@ import {
   formatPercent,
   formatGpa,
 } from '../domain/calculations.js';
+import { useDraftText } from './useDraftText.js';
 
 function NumericCellInput({
   value,
@@ -119,6 +120,12 @@ export default function CourseCard({
     return () => clearTimeout(timer);
   }, [confirmingCatId]);
 
+  const codeDraft = useDraftText(course.code || 'COURSE', {
+    onCommit: (nextCode) => onUpdateCourse({ code: nextCode }),
+    fallbackOnEmpty: (initialOnFocus, currentCommitted) =>
+      initialOnFocus || currentCommitted || 'COURSE',
+  });
+
   const stats = calculateCourseStats(course, null, gradeScale);
   const targetPct = typeof course.targetPct === 'number' ? course.targetPct : 85;
   const targetInfo = calculateTargetRequirement(course, targetPct, null);
@@ -227,11 +234,18 @@ export default function CourseCard({
           <input
             type="text"
             className="course-code-input"
-            value={course.code}
+            value={codeDraft.value}
             disabled={readOnly}
             placeholder="COURSE"
             aria-label="Course code"
-            onChange={(e) => onUpdateCourse({ code: e.target.value })}
+            onFocus={codeDraft.onFocus}
+            onChange={codeDraft.onChange}
+            onBlur={codeDraft.onBlur}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.currentTarget.blur();
+              }
+            }}
           />
           <input
             type="text"

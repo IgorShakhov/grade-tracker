@@ -596,6 +596,114 @@ describe('Grade Tracker React Application (M1 + M1.1 + Firebase Cloud Sync)', ()
       screen.queryByRole('alertdialog', { name: /Delete course/i }),
     ).not.toBeInTheDocument();
   });
+
+  it('allows clearing a Course Code input to empty without crashing and reverts cleanly on blur (#33)', () => {
+    render(<App />);
+    const codeInput = screen.getByDisplayValue('ECON101');
+    const undoBtn = screen.getByRole('button', { name: /↶ Undo/i });
+    expect(undoBtn).toBeDisabled();
+
+    // Clearing directly via change (even without focus) keeps the app mounted and shows ''
+    fireEvent.change(codeInput, { target: { value: '' } });
+    expect(screen.getByText('Cumulative GPA')).toBeInTheDocument();
+    expect(codeInput).toHaveValue('');
+
+    // Blurring an empty draft restores the previous valid course code without creating bogus history
+    fireEvent.blur(codeInput);
+    expect(codeInput).toHaveValue('ECON101');
+    expect(storageService.load().terms[0].courses[0].code).toBe('ECON101');
+    expect(undoBtn).toBeDisabled();
+
+    // Focusing, typing a partial edit, then clearing to '' and blurring restores the pre-focus code
+    fireEvent.focus(codeInput);
+    fireEvent.change(codeInput, { target: { value: 'M' } });
+    fireEvent.change(codeInput, { target: { value: '' } });
+    expect(codeInput).toHaveValue('');
+    fireEvent.blur(codeInput);
+    expect(codeInput).toHaveValue('ECON101');
+    expect(storageService.load().terms[0].courses[0].code).toBe('ECON101');
+  });
+
+  it('preserves trailing and internal spaces while typing owner names ("Jane Doe") and course codes ("MATH 101"), and does not snap cleared owner name to "My" until blur (#34)', () => {
+    render(<App />);
+    const ownerInput = screen.getByLabelText('Tracker owner or label');
+
+    // Clearing owner input stays empty while editing rather than snapping immediately to "My"
+    fireEvent.focus(ownerInput);
+    fireEvent.change(ownerInput, { target: { value: '' } });
+    expect(ownerInput).toHaveValue('');
+
+    // Typing "Jane Doe" one character at a time preserves "Jane " mid-stream
+    let currentOwner = '';
+    for (const ch of 'Jane Doe') {
+      currentOwner += ch;
+      fireEvent.change(ownerInput, { target: { value: currentOwner } });
+      expect(ownerInput).toHaveValue(currentOwner);
+    }
+    fireEvent.blur(ownerInput);
+    expect(ownerInput).toHaveValue('Jane Doe');
+    expect(storageService.load().studentName).toBe('Jane Doe');
+
+    // Clearing "Jane Doe" and blurring resets cleanly to "My"
+    fireEvent.focus(ownerInput);
+    fireEvent.change(ownerInput, { target: { value: '   ' } });
+    expect(ownerInput).toHaveValue('   ');
+    fireEvent.blur(ownerInput);
+    expect(ownerInput).toHaveValue('My');
+    expect(storageService.load().studentName).toBe('My');
+
+    // Typing "MATH 101" character by character into Course Code preserves "MATH "
+    const codeInput = screen.getByDisplayValue('ECON101');
+    fireEvent.focus(codeInput);
+    let currentCode = '';
+    for (const ch of 'MATH 101') {
+      currentCode += ch;
+      fireEvent.change(codeInput, { target: { value: currentCode } });
+      expect(codeInput).toHaveValue(currentCode);
+    }
+    fireEvent.blur(codeInput);
+    expect(codeInput).toHaveValue('MATH 101');
+    expect(storageService.load().terms[0].courses[0].code).toBe('MATH 101');
+  });
+
+  it('catches unexpected render errors in <ErrorBoundary> and allows recovery without losing local data (#33)', async () => {
+    const { default: ErrorBoundary } = await import(
+      '../../src/components/ErrorBoundary.jsx'
+    );
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    let shouldThrow = true;
+
+    function FragileChild() {
+      if (shouldThrow) {
+        throw new Error('Simulated render boom');
+      }
+      return <div>Recovered tracker view</div>;
+    }
+
+    try {
+      render(
+        <ErrorBoundary
+          onReset={() => {
+            shouldThrow = false;
+          }}
+        >
+          <FragileChild />
+        </ErrorBoundary>,
+      );
+
+      const alertBox = screen.getByRole('alert');
+      expect(within(alertBox).getByText(/Something went wrong/i)).toBeInTheDocument();
+      expect(within(alertBox).getByText(/Simulated render boom/i)).toBeInTheDocument();
+      expect(
+        within(alertBox).getByRole('button', { name: /Download Local Backup/i }),
+      ).toBeInTheDocument();
+
+      fireEvent.click(within(alertBox).getByRole('button', { name: /Reload Tracker/i }));
+      expect(screen.getByText('Recovered tracker view')).toBeInTheDocument();
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
 });
 
 

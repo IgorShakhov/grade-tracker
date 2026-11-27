@@ -342,6 +342,15 @@ export default function App() {
     }
   }, [localSaveSeq, needsPersist, state]);
 
+  const safePrepareForSave = useCallback((candidate, options) => {
+    try {
+      return storageService.prepareForSave(candidate, options);
+    } catch (err) {
+      console.error('Rejected invalid tracker state update:', err);
+      return null;
+    }
+  }, []);
+
   const updateCurrentWithoutHistory = useCallback(
     (updater, { touchTimestamp = false } = {}) => {
       if (simMode) {
@@ -356,10 +365,11 @@ export default function App() {
         const nextCurrent =
           typeof updater === 'function' ? updater(prev.current) : updater;
         if (nextCurrent === prev.current) return prev;
-        const prepared = storageService.prepareForSave(nextCurrent, {
+        const prepared = safePrepareForSave(nextCurrent, {
           touchTimestamp,
           nowIso,
         });
+        if (!prepared) return prev;
         return {
           ...prev,
           current: prepared,
@@ -368,7 +378,7 @@ export default function App() {
         };
       });
     },
-    [simMode],
+    [simMode, safePrepareForSave],
   );
 
   /**
@@ -398,10 +408,11 @@ export default function App() {
         const computed =
           typeof updater === 'function' ? updater(prev.current) : updater;
         if (computed === prev.current) return prev;
-        const prepared = storageService.prepareForSave(computed, {
+        const prepared = safePrepareForSave(computed, {
           touchTimestamp,
           nowIso,
         });
+        if (!prepared) return prev;
         return {
           current: prepared,
           past: shouldCoalesce
@@ -413,7 +424,7 @@ export default function App() {
         };
       });
     },
-    [simMode],
+    [simMode, safePrepareForSave],
   );
 
   const handleUndo = useCallback(() => {
@@ -423,10 +434,11 @@ export default function App() {
     setDoc((prev) => {
       if (prev.past.length === 0) return prev;
       const previous = prev.past[prev.past.length - 1];
-      const restored = storageService.prepareForSave(previous, {
+      const restored = safePrepareForSave(previous, {
         touchTimestamp: true,
         nowIso,
       });
+      if (!restored) return prev;
       return {
         current: restored,
         past: prev.past.slice(0, -1),
@@ -436,7 +448,7 @@ export default function App() {
       };
     });
     showToast('Undid last change.');
-  }, [isSharedReadOnly, simMode, showToast]);
+  }, [isSharedReadOnly, simMode, showToast, safePrepareForSave]);
 
   const handleRedo = useCallback(() => {
     if (isSharedReadOnly || simMode) return;
@@ -445,10 +457,11 @@ export default function App() {
     setDoc((prev) => {
       if (prev.future.length === 0) return prev;
       const [nextItem, ...remainingFuture] = prev.future;
-      const restored = storageService.prepareForSave(nextItem, {
+      const restored = safePrepareForSave(nextItem, {
         touchTimestamp: true,
         nowIso,
       });
+      if (!restored) return prev;
       return {
         current: restored,
         past: [...prev.past.slice(-(MAX_HISTORY - 1)), prev.current],
@@ -458,7 +471,7 @@ export default function App() {
       };
     });
     showToast('Redid change.');
-  }, [isSharedReadOnly, simMode, showToast]);
+  }, [isSharedReadOnly, simMode, showToast, safePrepareForSave]);
 
   // Global keyboard shortcuts: Ctrl/Cmd+Z (Undo) and Ctrl/Cmd+Shift+Z or Ctrl+Y (Redo)
   useEffect(() => {
@@ -554,10 +567,11 @@ export default function App() {
     setSandboxState(null);
     const nowIso = new Date().toISOString();
     setDoc((prev) => {
-      const prepared = storageService.prepareForSave(sharedState, {
+      const prepared = safePrepareForSave(sharedState, {
         touchTimestamp: true,
         nowIso,
       });
+      if (!prepared) return prev;
       return {
         current: prepared,
         past: [...prev.past.slice(-(MAX_HISTORY - 1)), prev.current],
