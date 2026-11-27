@@ -160,8 +160,8 @@ export function extractLiveViewTokenFromUrl(locationLike) {
 
   if (!target) return null;
 
-  let hash = '';
-  let search = '';
+  let hash;
+  let search;
 
   if (typeof target === 'string') {
     try {
@@ -367,6 +367,7 @@ export async function fetchSharedView(
     if (isSchemaTooNewError(err)) {
       throw new Error(
         'This shared tracker uses a newer Grade Tracker format. Reload the page to view it.',
+        { cause: err },
       );
     }
     throw err;
@@ -1251,7 +1252,7 @@ export class CloudSyncManager {
         this.status = nextStatus;
         this.error = msg;
         this.emit();
-        throw new Error(msg);
+        throw new Error(msg, { cause: err });
       }
       if (this.status === 'syncing' || !this.currentUser) {
         this.status = nextStatus;
@@ -1782,7 +1783,10 @@ export class CloudSyncManager {
             this.emit();
           }
         }
-        throw new Error(formatFriendlyError(err) || 'Could not resolve sync conflict.');
+        throw new Error(
+          formatFriendlyError(err) || 'Could not resolve sync conflict.',
+          { cause: err },
+        );
       }
     }
 
@@ -1816,7 +1820,10 @@ export class CloudSyncManager {
             this.emit();
           }
         }
-        throw new Error(formatFriendlyError(err) || 'Could not resolve sync conflict.');
+        throw new Error(
+          formatFriendlyError(err) || 'Could not resolve sync conflict.',
+          { cause: err },
+        );
       }
     }
 
@@ -2232,7 +2239,6 @@ export class CloudSyncManager {
           if (!this.isSessionCurrent(uid, startEpoch)) return false;
           if (shareSnap.exists() && shareSnap.data()?.ownerUid === uid) {
             batch.delete(fb.doc('shares', token));
-            hasDeletes = true;
           }
         }
         batch.delete(userRef);
@@ -2247,11 +2253,14 @@ export class CloudSyncManager {
     };
 
     this.inFlightPromise = run();
-    let shouldSignOut = false;
+    let shouldSignOut;
     try {
       shouldSignOut = await this.inFlightPromise;
     } catch (err) {
-      throw new Error(formatFriendlyError(err) || 'Could not delete cloud data.');
+      throw new Error(
+        formatFriendlyError(err) || 'Could not delete cloud data.',
+        { cause: err },
+      );
     } finally {
       this.inFlightPromise = null;
     }

@@ -784,7 +784,7 @@ export class StorageService {
   }
 
   load() {
-    let raw = null;
+    let raw;
     try {
       raw = this.storage.getItem(this.storageKey);
     } catch {
