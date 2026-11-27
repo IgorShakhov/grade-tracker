@@ -130,10 +130,14 @@ export default function App() {
   const sharedStateRef = useRef(sharedState);
   sharedStateRef.current = sharedState;
   const [liveShareTokenView, setLiveShareTokenView] = useState(null);
+  const liveShareTokenViewRef = useRef(liveShareTokenView);
+  liveShareTokenViewRef.current = liveShareTokenView;
+  const urlRequestSeqRef = useRef(0);
   const [liveRefreshing, setLiveRefreshing] = useState(false);
 
   // When non-null, What-If Simulator is active and isolates all edits in memory
   const [sandboxState, setSandboxState] = useState(null);
+  const [simEpoch, setSimEpoch] = useState(0);
   const [showShareModal, setShowShareModal] = useState(false);
   const [snapshotShareUrl, setSnapshotShareUrl] = useState('');
   const [showScaleModal, setShowScaleModal] = useState(false);
@@ -204,13 +208,12 @@ export default function App() {
   // Check URL for either `#view=<token>` (Live Read-Only Cloud Share) or `#share=...` (Compressed Snapshot)
   useEffect(() => {
     let cancelled = false;
-    let requestSeq = 0;
 
     function clearActiveSharedViewIfNeeded() {
       if (!sharedStateRef.current) return;
-      setPendingDelete((prev) =>
-        prev?.kind === 'save-shared-copy' ? null : prev,
-      );
+      setPendingDelete(null);
+      setShowScaleModal(false);
+      setShowShareModal(false);
       setSandboxState(null);
       setLiveShareTokenView(null);
       setSharedState(null);
@@ -218,8 +221,8 @@ export default function App() {
 
     async function checkUrlViewMode() {
       if (typeof window === 'undefined') return;
-      const mySeq = ++requestSeq;
-      const isCurrent = () => !cancelled && mySeq === requestSeq;
+      const mySeq = ++urlRequestSeqRef.current;
+      const isCurrent = () => !cancelled && mySeq === urlRequestSeqRef.current;
 
       const viewToken = extractLiveViewTokenFromUrl(window.location);
       if (viewToken) {
@@ -241,6 +244,8 @@ export default function App() {
           if (isCurrent()) {
             if (remote.exists && remote.state) {
               setPendingDelete(null);
+              setShowScaleModal(false);
+              setShowShareModal(false);
               setSandboxState(null);
               setLiveShareTokenView(viewToken);
               setSharedState(remote.state);
@@ -269,6 +274,8 @@ export default function App() {
       if (isCurrent()) {
         if (decoded) {
           setPendingDelete(null);
+          setShowScaleModal(false);
+          setShowShareModal(false);
           setSandboxState(null);
           setLiveShareTokenView(null);
           setSharedState(decoded);
@@ -310,10 +317,14 @@ export default function App() {
 
   const handleToggleSimMode = useCallback(() => {
     setPendingDelete(null);
+    setShowScaleModal(false);
+    setSimEpoch((n) => n + 1);
     setSandboxState((prev) => (prev !== null ? null : structuredClone(baseState)));
   }, [baseState]);
 
   const handleResetSimulation = useCallback(() => {
+    setPendingDelete(null);
+    setSimEpoch((n) => n + 1);
     setSandboxState(structuredClone(baseState));
   }, [baseState]);
 
@@ -487,11 +498,12 @@ export default function App() {
 
   // --- Shared / Live View Handlers ---
   function handleExitSharedView() {
+    urlRequestSeqRef.current += 1;
     clearShareParamsFromCurrentUrl(window);
     clearLiveViewFromUrl(window);
-    setPendingDelete((prev) =>
-      prev?.kind === 'save-shared-copy' ? null : prev,
-    );
+    setPendingDelete(null);
+    setShowScaleModal(false);
+    setShowShareModal(false);
     setSandboxState(null);
     setLiveShareTokenView(null);
     setSharedState(null);
@@ -499,11 +511,20 @@ export default function App() {
 
   async function handleRefreshLiveShare() {
     if (!liveShareTokenView) return;
+    const tokenAtStart = liveShareTokenView;
+    const seqAtStart = urlRequestSeqRef.current;
     setLiveRefreshing(true);
     try {
-      const remote = await fetchSharedView(liveShareTokenView);
+      const remote = await fetchSharedView(tokenAtStart);
+      if (
+        urlRequestSeqRef.current !== seqAtStart ||
+        liveShareTokenViewRef.current !== tokenAtStart
+      ) {
+        return;
+      }
       if (remote.exists && remote.state) {
         setSharedState(remote.state);
+        setSimEpoch((n) => n + 1);
         setSandboxState((prev) =>
           prev !== null ? structuredClone(remote.state) : null,
         );
@@ -512,7 +533,12 @@ export default function App() {
         showToast('This shared link was turned off or rotated.');
       }
     } catch (err) {
-      showToast(err?.message || 'Could not refresh shared grades.');
+      if (
+        urlRequestSeqRef.current === seqAtStart &&
+        liveShareTokenViewRef.current === tokenAtStart
+      ) {
+        showToast(err?.message || 'Could not refresh shared grades.');
+      }
     } finally {
       setLiveRefreshing(false);
     }
@@ -520,7 +546,10 @@ export default function App() {
 
   function applySaveSharedCopyLocally() {
     if (!sharedState) return;
+    urlRequestSeqRef.current += 1;
     setPendingDelete(null);
+    setShowScaleModal(false);
+    setShowShareModal(false);
     setSandboxState(null);
     const nowIso = new Date().toISOString();
     setDoc((prev) => {
@@ -552,6 +581,9 @@ export default function App() {
       applySaveSharedCopyLocally();
       return;
     }
+    setShowShareModal(false);
+    setShowScaleModal(false);
+    setShowSyncModal(false);
     setPendingDelete({
       kind: 'save-shared-copy',
       title: 'Replace Your Tracker Courses?',
@@ -564,6 +596,9 @@ export default function App() {
 
   // --- Cloud Sync & Auth Handlers ---
   function handleOpenSyncControl() {
+    setShowShareModal(false);
+    setShowScaleModal(false);
+    setPendingDelete(null);
     if (syncSnapshot.status === 'conflict') {
       setConflictDismissed(false);
       return;
@@ -631,12 +666,18 @@ export default function App() {
 
   // --- Unified Share Modal ---
   async function handleOpenShareModal() {
+    setShowSyncModal(false);
+    setShowScaleModal(false);
+    setPendingDelete(null);
     try {
       const token = await encodeShareSnapshot(baseState);
       const url = buildShareUrl(window.location.href, token);
       setSnapshotShareUrl(url);
     } catch {
       setSnapshotShareUrl('');
+    }
+    if (cloudSyncManager.getSnapshot().status === 'conflict') {
+      return;
     }
     setShowShareModal(true);
   }
@@ -677,6 +718,9 @@ export default function App() {
     const term = activeState.terms.find((t) => t.id === termId);
     if (!term || activeState.terms.length <= 1) return;
     const count = term.courses.length;
+    setShowShareModal(false);
+    setShowScaleModal(false);
+    setShowSyncModal(false);
     setPendingDelete({
       kind: 'term',
       termId,
@@ -777,6 +821,9 @@ export default function App() {
 
   function requestDeleteCourse(course) {
     const catCount = course.categories.length;
+    setShowShareModal(false);
+    setShowScaleModal(false);
+    setShowSyncModal(false);
     setPendingDelete({
       kind: 'course',
       termId: activeTerm.id,
@@ -1045,7 +1092,7 @@ export default function App() {
           <div className="courses-column">
             {allCoursesInTerm.map((course, idx) => (
               <CourseCard
-                key={`${course.id}-${simMode ? 'sim' : 'live'}`}
+                key={`${course.id}-${simMode ? `sim-${simEpoch}` : 'live'}`}
                 course={course}
                 courseIndex={idx}
                 totalCourses={allCoursesInTerm.length}
@@ -1168,7 +1215,12 @@ export default function App() {
             gradeScale={gradeScale}
             lastUpdated={activeState.lastUpdated}
             readOnly={readOnly}
-            onOpenScaleEditor={() => setShowScaleModal(true)}
+            onOpenScaleEditor={() => {
+              setShowShareModal(false);
+              setShowSyncModal(false);
+              setPendingDelete(null);
+              setShowScaleModal(true);
+            }}
           />
         </div>
       </main>
@@ -1180,20 +1232,32 @@ export default function App() {
           liveShareUrl={liveShareUrl}
           snapshotUrl={snapshotShareUrl}
           onEnableOrRotateLiveShare={async (isRotate) => {
-            const newToken = await cloudSyncManager.enableOrRotateShare(
-              stateRef.current,
-            );
-            const nextUrl = buildLiveShareUrl(window.location.href, newToken);
-            await handleCopyUrlText(
-              nextUrl,
-              isRotate
-                ? 'Rotated live link and copied new URL.'
-                : 'Enabled live read-only link and copied URL.',
-            );
+            try {
+              const newToken = await cloudSyncManager.enableOrRotateShare(
+                stateRef.current,
+              );
+              const nextUrl = buildLiveShareUrl(window.location.href, newToken);
+              await handleCopyUrlText(
+                nextUrl,
+                isRotate
+                  ? 'Rotated live link and copied new URL.'
+                  : 'Enabled live read-only link and copied URL.',
+              );
+            } finally {
+              if (cloudSyncManager.getSnapshot().status === 'conflict') {
+                setConflictDismissed(false);
+              }
+            }
           }}
           onDisableLiveShare={async () => {
-            await cloudSyncManager.disableShare(stateRef.current);
-            showToast('Turned off live read-only link.');
+            try {
+              await cloudSyncManager.disableShare(stateRef.current);
+              showToast('Turned off live read-only link.');
+            } finally {
+              if (cloudSyncManager.getSnapshot().status === 'conflict') {
+                setConflictDismissed(false);
+              }
+            }
           }}
           onCopyUrl={handleCopyUrlText}
           onOpenSignIn={() => setShowSyncModal(true)}
