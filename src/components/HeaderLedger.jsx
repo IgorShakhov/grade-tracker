@@ -1,4 +1,5 @@
 import { formatGpa, formatPercent, formatLastUpdated } from '../domain/calculations.js';
+import { useDraftText } from './useDraftText.js';
 
 function getSyncLabel(readOnlyMode, syncSnapshot) {
   if (readOnlyMode === 'live-share') {
@@ -48,8 +49,13 @@ export default function HeaderLedger({
   onOpenShare,
 }) {
   const { overall, termStats } = stats;
+  const ownerDraft = useDraftText(studentName || 'My', {
+    onCommit: onChangeName,
+    fallbackOnEmpty: 'My',
+  });
+  const displayedOwner = ownerDraft.value;
   const possessiveTitle =
-    !studentName || studentName.trim().toLowerCase() === 'my'
+    !displayedOwner.trim() || displayedOwner.trim().toLowerCase() === 'my'
       ? 'Grade Tracker'
       : "'s Grade Tracker";
 
@@ -70,11 +76,18 @@ export default function HeaderLedger({
                   id="owner-name-input"
                   type="text"
                   className="owner-name-input"
-                  value={studentName}
+                  value={displayedOwner}
                   disabled={readOnly}
                   aria-label="Tracker owner or label"
-                  size={Math.max(2, (studentName || 'My').length)}
-                  onChange={(e) => onChangeName(e.target.value)}
+                  size={Math.max(2, (displayedOwner || 'My').length)}
+                  onFocus={ownerDraft.onFocus}
+                  onChange={ownerDraft.onChange}
+                  onBlur={ownerDraft.onBlur}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.currentTarget.blur();
+                    }
+                  }}
                 />
                 <span>{possessiveTitle}</span>
               </h1>
