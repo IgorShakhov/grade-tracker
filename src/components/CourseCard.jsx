@@ -200,15 +200,25 @@ export default function CourseCard({
         isDragging ? 'dragging' : ''
       } ${isDragOver ? 'drag-over' : ''}`}
       aria-label={`Course ${course.code}`}
-      draggable={!readOnly}
-      onDragStart={onDragStart}
       onDragOver={onDragOver}
       onDrop={onDrop}
-      onDragEnd={onDragEnd}
     >
       {/* Course Header Strip */}
       <div className="course-header">
         <div className="course-lead-controls">
+          {!readOnly && totalCourses > 1 && (
+            <span
+              className="course-drag-handle"
+              draggable
+              onDragStart={onDragStart}
+              onDragEnd={onDragEnd}
+              title="Drag to reorder course"
+              aria-hidden="true"
+            >
+              ⋮⋮
+            </span>
+          )}
+
           <button
             type="button"
             className="icon-ctrl-btn"
@@ -361,7 +371,11 @@ export default function CourseCard({
             <table className="categories-table">
               <thead>
                 <tr>
-                  {!readOnly && <th scope="col" className="col-order" aria-label="Order" />}
+                  {!readOnly && (
+                    <th scope="col" className="col-order">
+                      <span className="sr-only">Order</span>
+                    </th>
+                  )}
                   <th scope="col">Category</th>
                   <th scope="col" className="col-num">
                     Weight
@@ -372,7 +386,11 @@ export default function CourseCard({
                   <th scope="col" className="col-contrib">
                     Earned
                   </th>
-                  {!readOnly && <th scope="col" className="col-action" />}
+                  {!readOnly && (
+                    <th scope="col" className="col-action">
+                      <span className="sr-only">Actions</span>
+                    </th>
+                  )}
                 </tr>
               </thead>
               <tbody>

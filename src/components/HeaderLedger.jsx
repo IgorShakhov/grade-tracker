@@ -71,7 +71,7 @@ export default function HeaderLedger({
               GT
             </div>
             <div className="title-stack">
-              <h1>
+              <div className="title-heading-row">
                 <input
                   id="owner-name-input"
                   type="text"
@@ -89,8 +89,14 @@ export default function HeaderLedger({
                     }
                   }}
                 />
-                <span>{possessiveTitle}</span>
-              </h1>
+                <h1 className="site-title">
+                  {displayedOwner.trim() &&
+                  displayedOwner.trim().toLowerCase() !== 'my' ? (
+                    <span className="sr-only">{displayedOwner.trim()}</span>
+                  ) : null}
+                  <span>{possessiveTitle}</span>
+                </h1>
+              </div>
               <p className="meta-subtitle">
                 <span>Last Update: {formatLastUpdated(lastUpdated)}</span>
                 <span className="meta-dot">•</span>

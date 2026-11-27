@@ -1,6 +1,7 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import { DEFAULT_GRADE_SCALE, MAX_GPA_POINTS } from '../domain/constants.js';
 import { deriveTierFromGpa } from '../domain/calculations.js';
+import { useDialogFocus } from './useDialogFocus.js';
 
 const SCALE_DECIMAL_RE = /^(?:\d+(?:\.\d*)?|\.\d+)$/;
 
@@ -26,6 +27,8 @@ export function ShareModal({
 }) {
   const [busy, setBusy] = useState(null);
   const [error, setError] = useState('');
+  const panelRef = useRef(null);
+  useDialogFocus(panelRef);
 
   async function runShareOp(label, fn) {
     setError('');
@@ -58,6 +61,8 @@ export function ShareModal({
   return (
     <div className="modal-backdrop" onClick={handleDismiss}>
       <div
+        ref={panelRef}
+        tabIndex={-1}
         className="modal-panel"
         role="dialog"
         aria-modal="true"
@@ -79,7 +84,9 @@ export function ShareModal({
 
         <div className="modal-body">
           {error && (
-            <p style={{ color: 'var(--danger-fg)', fontWeight: 600 }}>{error}</p>
+            <p role="alert" style={{ color: 'var(--danger-fg)', fontWeight: 600 }}>
+              {error}
+            </p>
           )}
 
           {!isSharedReadOnly && (
@@ -114,6 +121,7 @@ export function ShareModal({
                       className="share-url-input"
                       value={liveShareUrl}
                       readOnly
+                      aria-label="Live auto-updating share URL"
                       onFocus={(e) => e.target.select()}
                     />
                     <button
@@ -199,6 +207,7 @@ export function ShareModal({
                   className="share-url-input"
                   value={snapshotUrl}
                   readOnly
+                  aria-label="Point-in-time snapshot share URL"
                   onFocus={(e) => e.target.select()}
                 />
                 <button
@@ -239,6 +248,8 @@ export function ScaleEditorModal({ gradeScale, onSaveScale, onClose }) {
     })),
   );
   const [error, setError] = useState('');
+  const panelRef = useRef(null);
+  useDialogFocus(panelRef);
 
   useEffect(() => {
     function handleKeyDown(e) {
@@ -389,6 +400,8 @@ export function ScaleEditorModal({ gradeScale, onSaveScale, onClose }) {
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <div
+        ref={panelRef}
+        tabIndex={-1}
         className="modal-panel"
         role="dialog"
         aria-modal="true"
@@ -420,7 +433,7 @@ export function ScaleEditorModal({ gradeScale, onSaveScale, onClose }) {
           )}
 
           {!error && gapWarning && (
-            <p style={{ color: 'var(--warn-fg, #92400e)', fontWeight: 500 }}>
+            <p style={{ color: 'var(--warn-fg, #78350f)', fontWeight: 500 }}>
               {gapWarning}
             </p>
           )}
@@ -428,11 +441,13 @@ export function ScaleEditorModal({ gradeScale, onSaveScale, onClose }) {
           <table className="scale-editor-table">
             <thead>
               <tr>
-                <th>Min %</th>
-                <th>Max %</th>
-                <th>Letter</th>
-                <th>GPA</th>
-                <th />
+                <th scope="col">Min %</th>
+                <th scope="col">Max %</th>
+                <th scope="col">Letter</th>
+                <th scope="col">GPA</th>
+                <th scope="col">
+                  <span className="sr-only">Actions</span>
+                </th>
               </tr>
             </thead>
             <tbody>
@@ -444,6 +459,7 @@ export function ScaleEditorModal({ gradeScale, onSaveScale, onClose }) {
                       step="any"
                       className="scale-editor-input"
                       value={r.min}
+                      aria-label={`Band ${idx + 1} minimum percent`}
                       onChange={(e) => updateRow(idx, 'min', e.target.value)}
                     />
                   </td>
@@ -453,6 +469,7 @@ export function ScaleEditorModal({ gradeScale, onSaveScale, onClose }) {
                       step="any"
                       className="scale-editor-input"
                       value={r.max}
+                      aria-label={`Band ${idx + 1} maximum percent`}
                       onChange={(e) => updateRow(idx, 'max', e.target.value)}
                     />
                   </td>
@@ -461,6 +478,7 @@ export function ScaleEditorModal({ gradeScale, onSaveScale, onClose }) {
                       type="text"
                       className="scale-editor-input"
                       value={r.letter}
+                      aria-label={`Band ${idx + 1} letter grade`}
                       onChange={(e) => updateRow(idx, 'letter', e.target.value)}
                     />
                   </td>
@@ -470,6 +488,7 @@ export function ScaleEditorModal({ gradeScale, onSaveScale, onClose }) {
                       step="any"
                       className="scale-editor-input"
                       value={r.gpa}
+                      aria-label={`Band ${idx + 1} GPA points`}
                       onChange={(e) => updateRow(idx, 'gpa', e.target.value)}
                     />
                   </td>
@@ -480,6 +499,7 @@ export function ScaleEditorModal({ gradeScale, onSaveScale, onClose }) {
                       disabled={rows.length <= 1}
                       onClick={() => removeBand(idx)}
                       title="Remove band"
+                      aria-label={`Remove band ${r.letter || idx + 1}`}
                     >
                       ×
                     </button>
@@ -515,6 +535,9 @@ export function ConfirmDeleteModal({
   onConfirm,
   onClose,
 }) {
+  const panelRef = useRef(null);
+  useDialogFocus(panelRef, { initialFocusSelector: '#confirm-cancel-btn' });
+
   useEffect(() => {
     function handleKeyDown(e) {
       if (e.key === 'Escape') {
@@ -538,6 +561,8 @@ export function ConfirmDeleteModal({
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <div
+        ref={panelRef}
+        tabIndex={-1}
         className="modal-panel"
         style={{ maxWidth: '420px' }}
         role="alertdialog"
@@ -560,7 +585,12 @@ export function ConfirmDeleteModal({
         <div className="modal-body">
           <p>{message}</p>
           <div className="modal-footer-btns" style={{ justifyContent: 'flex-end' }}>
-            <button type="button" className="btn btn-sm" onClick={onClose}>
+            <button
+              id="confirm-cancel-btn"
+              type="button"
+              className="btn btn-sm"
+              onClick={onClose}
+            >
               Cancel
             </button>
             <button
