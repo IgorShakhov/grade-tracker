@@ -433,7 +433,13 @@ export function ConfirmDeleteModal({
       if (e.key === 'Escape') {
         e.preventDefault();
         onClose();
-      } else if (e.key === 'Enter') {
+      } else if (e.key === 'Enter' && !e.repeat) {
+        const targetEl =
+          e.target instanceof Element ? e.target : document.activeElement;
+        const modalBtn = targetEl?.closest?.('.modal-panel button');
+        if (modalBtn && modalBtn.id !== 'confirm-delete-btn') {
+          return;
+        }
         e.preventDefault();
         onConfirm();
       }

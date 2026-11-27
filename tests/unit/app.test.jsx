@@ -541,7 +541,63 @@ describe('Grade Tracker React Application (M1 + M1.1 + Firebase Cloud Sync)', ()
       });
     }
   });
+
+  it('does not confirm ConfirmDeleteModal on Enter when Cancel is focused and clears What-If delete modals on back-navigation (Cluster 3 QA)', async () => {
+    const { createInitialState } = await import('../../src/domain/templates.js');
+    const token = 'B'.repeat(32);
+    const sharedPayload = createInitialState();
+    sharedPayload.studentName = 'Friend';
+    mockGetDoc.mockImplementation(async (ref) => {
+      if (ref.path === `shares/${token}`) {
+        return {
+          exists: () => true,
+          data: () => ({
+            ownerUid: 'friend-uid',
+            stateJson: JSON.stringify(sharedPayload),
+            updatedAt: 'ts-1',
+          }),
+        };
+      }
+      return { exists: () => false, data: () => undefined };
+    });
+
+    window.history.replaceState({}, '', `/#view=${token}`);
+    render(<App />);
+    expect(
+      await screen.findByText(/Live Shared Grade Tracker/i),
+    ).toBeInTheDocument();
+
+    // 1. Open Save Copy Locally -> focus Cancel -> press Enter -> must NOT confirm!
+    fireEvent.click(screen.getByRole('button', { name: /Save Copy Locally/i }));
+    const confirmDialog = screen.getByRole('alertdialog', {
+      name: /Replace Your Tracker Courses\?/i,
+    });
+    const cancelBtn = within(confirmDialog).getByRole('button', {
+      name: /^Cancel$/i,
+    });
+    cancelBtn.focus();
+    fireEvent.keyDown(cancelBtn, { key: 'Enter', bubbles: true });
+    expect(storageService.load().studentName).toBe('My');
+    fireEvent.click(cancelBtn);
+
+    // 2. Enter What-If Simulator on shared view, open Delete Course modal, then navigate Back -> modal MUST close!
+    fireEvent.click(screen.getByRole('button', { name: /What-If Simulator/i }));
+    fireEvent.click(screen.getByRole('button', { name: 'Delete ECON101' }));
+    expect(
+      screen.getByRole('alertdialog', { name: /Delete course/i }),
+    ).toBeInTheDocument();
+
+    await act(async () => {
+      window.history.replaceState({}, '', '/');
+      window.dispatchEvent(new HashChangeEvent('hashchange'));
+    });
+
+    expect(
+      screen.queryByRole('alertdialog', { name: /Delete course/i }),
+    ).not.toBeInTheDocument();
+  });
 });
+
 
 
 
