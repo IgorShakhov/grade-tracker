@@ -1,8 +1,9 @@
-import { useState, useEffect } from 'react';
-import { UNIT_OPTIONS, TARGET_PRESETS } from '../domain/constants.js';
+import { useState, useEffect, useMemo } from 'react';
+import { UNIT_OPTIONS } from '../domain/constants.js';
 import {
   calculateCourseStats,
   calculateTargetRequirement,
+  buildTargetOptions,
   formatPercent,
   formatGpa,
 } from '../domain/calculations.js';
@@ -168,8 +169,15 @@ export default function CourseCard({
   });
 
   const stats = calculateCourseStats(course, null, gradeScale);
-  const targetPct = typeof course.targetPct === 'number' ? course.targetPct : 85;
+  const targetPct =
+    typeof course.targetPct === 'number' && Number.isFinite(course.targetPct)
+      ? course.targetPct
+      : 85;
   const targetInfo = calculateTargetRequirement(course, targetPct, null);
+  const targetOptions = useMemo(
+    () => buildTargetOptions(gradeScale, targetPct),
+    [gradeScale, targetPct],
+  );
 
   const isCollapsed = Boolean(course.collapsed);
   const isPassFail = Boolean(course.passFail ?? course.creditNoCredit);
@@ -573,7 +581,7 @@ export default function CourseCard({
                       onUpdateCourse({ targetPct: Number(e.target.value) })
                     }
                   >
-                    {TARGET_PRESETS.map((p) => (
+                    {targetOptions.map((p) => (
                       <option key={p.pct} value={p.pct}>
                         {p.label}
                       </option>

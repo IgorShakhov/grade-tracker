@@ -7,6 +7,8 @@ const UTC_DATE_FORMATTER = new Intl.DateTimeFormat('en-US', {
   timeZone: 'UTC',
 });
 
+const DATE_ONLY_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
+
 function normalizeDecimals(decimals, fallback) {
   return typeof decimals === 'number' &&
     Number.isInteger(decimals) &&
@@ -75,18 +77,159 @@ export function formatGpa(value, decimals = 1) {
   return rounded.toFixed(d);
 }
 
-export function formatLastUpdated(isoString) {
+/**
+ * Formats an ISO timestamp in the user's local timezone by default (#45),
+ * accepting an optional IANA `timeZone` override for deterministic testing,
+ * and preserving calendar day on plain `YYYY-MM-DD` strings.
+ */
+export function formatLastUpdated(isoString, timeZone) {
   if (!isoString || typeof isoString !== 'string') return '—';
   const trimmed = isoString.trim();
   if (!trimmed) return '—';
+
+  const dateOnlyMatch = DATE_ONLY_RE.exec(trimmed);
+  if (dateOnlyMatch) {
+    const year = Number(dateOnlyMatch[1]);
+    const month = Number(dateOnlyMatch[2]);
+    const day = Number(dateOnlyMatch[3]);
+    const utcNoon = new Date(Date.UTC(year, month - 1, day, 12, 0, 0));
+    if (
+      Number.isNaN(utcNoon.getTime()) ||
+      utcNoon.getUTCFullYear() !== year ||
+      utcNoon.getUTCMonth() !== month - 1 ||
+      utcNoon.getUTCDate() !== day
+    ) {
+      return '—';
+    }
+    return UTC_DATE_FORMATTER.format(utcNoon);
+  }
+
   const date = new Date(trimmed);
   if (Number.isNaN(date.getTime())) return '—';
-  return UTC_DATE_FORMATTER.format(date);
+
+  try {
+    const options = {
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+      ...(typeof timeZone === 'string' && timeZone.trim() !== ''
+        ? { timeZone: timeZone.trim() }
+        : {}),
+    };
+    return new Intl.DateTimeFormat('en-US', options).format(date);
+  } catch {
+    return new Intl.DateTimeFormat('en-US', {
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+    }).format(date);
+  }
+}
+
+/**
+ * Returns the minimum passing percentage for Pass/Fail (`P` vs `NP`) derived from
+ * the active `gradeScale` (lowest `min` among bands with `gpa > 0`, fallback `50`) (#39).
+ */
+export function getPassingThreshold(gradeScale = DEFAULT_GRADE_SCALE) {
+  const activeScale =
+    Array.isArray(gradeScale) && gradeScale.length > 0
+      ? gradeScale
+      : DEFAULT_GRADE_SCALE;
+
+  let lowestPassingMin = Infinity;
+  for (const band of activeScale) {
+    if (
+      band &&
+      typeof band.gpa === 'number' &&
+      Number.isFinite(band.gpa) &&
+      band.gpa > 0 &&
+      typeof band.min === 'number' &&
+      Number.isFinite(band.min) &&
+      band.min < lowestPassingMin
+    ) {
+      lowestPassingMin = band.min;
+    }
+  }
+  return Number.isFinite(lowestPassingMin) ? lowestPassingMin : 50;
+}
+
+/**
+ * Builds Target `<select>` options dynamically from the active `gradeScale` and
+ * appends a `Custom (<pct>%)` option whenever `currentTargetPct` is not already listed (#40).
+ */
+export function buildTargetOptions(
+  gradeScale = DEFAULT_GRADE_SCALE,
+  currentTargetPct = null,
+) {
+  const activeScale =
+    Array.isArray(gradeScale) && gradeScale.length > 0
+      ? [...gradeScale].sort((a, b) => (b?.min ?? 0) - (a?.min ?? 0))
+      : DEFAULT_GRADE_SCALE;
+  const passThreshold = getPassingThreshold(activeScale);
+
+  const options = [];
+  const seenPcts = new Set();
+
+  for (const band of activeScale) {
+    if (
+      !band ||
+      typeof band.min !== 'number' ||
+      !Number.isFinite(band.min) ||
+      band.min <= 0 ||
+      band.min > 100 ||
+      typeof band.gpa !== 'number' ||
+      !Number.isFinite(band.gpa) ||
+      band.gpa <= 0
+    ) {
+      continue;
+    }
+    const pct = band.min === 0 ? 0 : band.min;
+    if (seenPcts.has(pct)) continue;
+    seenPcts.add(pct);
+
+    const rawLetter = typeof band.letter === 'string' ? band.letter.trim() : '';
+    const isPassBand = pct === passThreshold;
+    const isAlreadyPassWord = /^(?:p|pass)$/i.test(rawLetter);
+    const label = isPassBand
+      ? isAlreadyPassWord || !rawLetter
+        ? `Pass (${pct}%)`
+        : `${rawLetter} / Pass (${pct}%)`
+      : `${rawLetter || `${pct}%`} (${pct}%)`;
+
+    options.push({ label, pct });
+  }
+
+  if (!seenPcts.has(passThreshold) && passThreshold > 0 && passThreshold <= 100) {
+    seenPcts.add(passThreshold);
+    options.push({ label: `Pass (${passThreshold}%)`, pct: passThreshold });
+  }
+
+  if (options.length === 0) {
+    seenPcts.add(50);
+    options.push({ label: 'Pass (50%)', pct: 50 });
+  }
+
+  if (
+    typeof currentTargetPct === 'number' &&
+    Number.isFinite(currentTargetPct)
+  ) {
+    const customPct = currentTargetPct === 0 ? 0 : currentTargetPct;
+    if (!seenPcts.has(customPct)) {
+      options.push({
+        label: `Custom (${customPct}%)`,
+        pct: customPct,
+      });
+    }
+  }
+
+  return options;
 }
 
 /**
  * Look up Letter Grade & Grade Point from a course percentage using a configurable grading scale.
- * Rounds final course percentages to the nearest integer (89.5% -> 90% A+).
+ * Uses half-up integer rounding (`roundHalfUp(clamped, 0)`) on integer scales (89.5% -> 90% A+),
+ * direct `+1e-9` comparison when custom scales specify decimal `min` bounds, and returns
+ * `{ letter: 'F', gpa: 0, tier: 'tier-f', roundedPct: rounded }` below every band's `min` (#38).
  */
 export function lookupGrade(percentage, gradeScale = DEFAULT_GRADE_SCALE) {
   if (percentage === null || percentage === undefined || typeof percentage !== 'number' || !Number.isFinite(percentage)) {
@@ -98,9 +241,13 @@ export function lookupGrade(percentage, gradeScale = DEFAULT_GRADE_SCALE) {
 
   const clamped = Math.max(0, Math.min(100, percentage));
   const rounded = Math.min(100, Math.max(0, roundHalfUp(clamped, 0)));
+  const hasDecimalMins = activeScale.some(
+    (r) => typeof r?.min === 'number' && Number.isFinite(r.min) && !Number.isInteger(r.min),
+  );
+  const compareScore = hasDecimalMins ? clamped + 1e-9 : rounded;
 
   for (const row of activeScale) {
-    if (rounded >= row.min) {
+    if (compareScore >= row.min) {
       return {
         letter: row.letter,
         gpa: row.gpa,
@@ -109,11 +256,10 @@ export function lookupGrade(percentage, gradeScale = DEFAULT_GRADE_SCALE) {
       };
     }
   }
-  const fallback = activeScale[activeScale.length - 1];
   return {
-    letter: fallback.letter,
-    gpa: fallback.gpa,
-    tier: fallback.tier || deriveTierFromGpa(fallback.gpa),
+    letter: 'F',
+    gpa: 0,
+    tier: 'tier-f',
     roundedPct: rounded,
   };
 }
@@ -514,10 +660,19 @@ function computeCourseInternal(course, simGrades = null, gradeScale = DEFAULT_GR
   const target = computeTargetFromTotals(totals, targetPct);
   const isPassFail = Boolean(course?.passFail ?? course?.creditNoCredit);
 
+  const passThreshold = getPassingThreshold(gradeScale);
+  const pfCompareScore =
+    overallGrade === null || !Number.isFinite(overallGrade)
+      ? null
+      : Number.isInteger(passThreshold)
+        ? gradeInfo.roundedPct
+        : Math.min(100, Math.max(0, overallGrade)) + 1e-9;
   const letter = isPassFail
-    ? (overallGrade === null || !Number.isFinite(overallGrade) || gradeInfo.roundedPct === null
+    ? pfCompareScore === null
       ? 'P/F'
-      : (gradeInfo.roundedPct >= 50 ? 'P' : 'NP'))
+      : pfCompareScore >= passThreshold
+        ? 'P'
+        : 'NP'
     : gradeInfo.letter;
 
   return {

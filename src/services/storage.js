@@ -1,4 +1,4 @@
-import { STORAGE_KEY, DEFAULT_GRADE_SCALE } from '../domain/constants.js';
+import { STORAGE_KEY, DEFAULT_GRADE_SCALE, MAX_GPA_POINTS } from '../domain/constants.js';
 import { deriveTierFromGpa } from '../domain/calculations.js';
 import { createInitialState } from '../domain/templates.js';
 
@@ -63,7 +63,7 @@ function normalizeGradeScale(rawScale) {
       typeof band.gpa !== 'number' ||
       !Number.isFinite(band.gpa) ||
       band.gpa < 0 ||
-      band.gpa > 100
+      band.gpa > MAX_GPA_POINTS
     ) {
       return cloneDefaultGradeScale();
     }

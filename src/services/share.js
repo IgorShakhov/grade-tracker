@@ -1,4 +1,4 @@
-import { DEFAULT_GRADE_SCALE } from '../domain/constants.js';
+import { DEFAULT_GRADE_SCALE, MAX_GPA_POINTS } from '../domain/constants.js';
 import { validateTrackerState } from './storage.js';
 
 const BASE64_CHUNK_SIZE = 0x8000;
@@ -215,7 +215,7 @@ export async function decodeShareSnapshot(token) {
           typeof min !== 'number' || !Number.isFinite(min) || min < 0 || min > 100 ||
           typeof max !== 'number' || !Number.isFinite(max) || max < min || max > 100 ||
           typeof letter !== 'string' || letter.trim() === '' ||
-          typeof gpa !== 'number' || !Number.isFinite(gpa) || gpa < 0 || gpa > 100
+          typeof gpa !== 'number' || !Number.isFinite(gpa) || gpa < 0 || gpa > MAX_GPA_POINTS
         ) {
           return null;
         }

@@ -949,6 +949,92 @@ describe('Grade Tracker React Application (M1 + M1.1 + Firebase Cloud Sync)', ()
       storageService.load();
     }
   });
+
+  it('displays Custom (<pct>%) in Target select (#40), enforces 0% floor/duplicate/overlap/gap rules + 12.0 GPA scales in ScaleEditorModal (#38), and flips 55% Pass/Fail courses to NP on 60% custom pass scales (#39)', async () => {
+    const { createInitialState } = await import('../../src/domain/templates.js');
+    const seeded = createInitialState();
+    seeded.terms[0].courses[0].targetPct = 88;
+    // Set MATH101 to Pass/Fail with a single 55% graded exam (P under default 50% threshold, NP under 60% threshold)
+    seeded.terms[0].courses[1].passFail = true;
+    seeded.terms[0].courses[1].categories = [
+      { id: 'm-pf', name: 'Midterm', weight: 60, grade: 55 },
+      { id: 'm-fin', name: 'Final', weight: 40, grade: null },
+    ];
+    window.localStorage.setItem('grade_tracker_v1', JSON.stringify(seeded));
+
+    render(<App />);
+
+    const targetSelect = screen.getByLabelText('ECON101 target grade');
+    expect(targetSelect.value).toBe('88');
+    expect(within(targetSelect).getByRole('option', { name: 'Custom (88%)' })).toBeInTheDocument();
+
+    const mathSection = screen.getByRole('region', { name: 'Course MATH101' });
+    expect(within(mathSection).getByTitle('Letter Grade')).toHaveTextContent('P');
+
+    // Open Customize Grading Scale modal and remove the 0–49% F band
+    fireEvent.click(screen.getByRole('button', { name: /Customize/i }));
+    const dialog = screen.getByRole('dialog', { name: /Customize Grading Scale/i });
+    const removeButtons = within(dialog).getAllByTitle('Remove band');
+    fireEvent.click(removeButtons[removeButtons.length - 1]);
+
+    // Saving without a 0% floor band must show an error and keep the dialog open
+    fireEvent.click(within(dialog).getByRole('button', { name: /Save Scale/i }));
+    expect(within(dialog).getByRole('alert')).toHaveTextContent(/0% floor band/i);
+
+    // Add back a 0% band, then blank out Row 1 Min % -> must reject empty string instead of coercing Number('') === 0!
+    fireEvent.click(within(dialog).getByRole('button', { name: /\+ Add Band/i }));
+    const numberInputs = within(dialog).getAllByRole('spinbutton');
+    fireEvent.change(numberInputs[0], { target: { value: '' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: /Save Scale/i }));
+    expect(within(dialog).getByRole('alert')).toHaveTextContent(/invalid or blank values/i);
+
+    // Duplicate Min % (85 === Row 2's 85) -> must reject duplicate Min %
+    fireEvent.change(numberInputs[0], { target: { value: '85' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: /Save Scale/i }));
+    expect(within(dialog).getByRole('alert')).toHaveTextContent(/Duplicate Min %/i);
+
+    // Overlapping range (88–100% vs 85–89%) -> must reject overlapping bands
+    fireEvent.change(numberInputs[0], { target: { value: '88' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: /Save Scale/i }));
+    expect(within(dialog).getByRole('alert')).toHaveTextContent(/overlap/i);
+
+    // Gap warning note appears when Row 1 is 92–100% leaving 90–91% uncovered
+    fireEvent.change(numberInputs[0], { target: { value: '92' } });
+    expect(within(dialog).getByText(/Note: Percentage gap between 89% and 92%/i)).toBeInTheDocument();
+
+    // Trim down to a 2-band custom 12-point scale with 60% passing cutoff: [60–100% H (12.0 GPA), 0–59% F (0.0 GPA)]
+    while (within(dialog).getAllByTitle('Remove band').length > 2) {
+      fireEvent.click(within(dialog).getAllByTitle('Remove band')[1]);
+    }
+    const twoBandNums = within(dialog).getAllByRole('spinbutton');
+    const twoBandText = within(dialog).getAllByRole('textbox');
+    // Row 0: 60..100, H, 12.0; Row 1: 0..59, F, 0.0
+    fireEvent.change(twoBandNums[0], { target: { value: '60' } });
+    fireEvent.change(twoBandNums[1], { target: { value: '100' } });
+    fireEvent.change(twoBandText[0], { target: { value: 'H' } });
+    fireEvent.change(twoBandNums[2], { target: { value: '12' } });
+    fireEvent.change(twoBandNums[3], { target: { value: '0' } });
+    fireEvent.change(twoBandNums[4], { target: { value: '59' } });
+    fireEvent.change(twoBandText[1], { target: { value: 'F' } });
+    fireEvent.change(twoBandNums[5], { target: { value: '0' } });
+
+    fireEvent.click(within(dialog).getByRole('button', { name: /Save Scale/i }));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+
+    // MATH101 (55% Pass/Fail) dynamically flips from P -> NP, and Target select updates to H / Pass (60%)!
+    const updatedMath = screen.getByRole('region', { name: 'Course MATH101' });
+    expect(within(updatedMath).getByTitle('Letter Grade')).toHaveTextContent('NP');
+    const updatedEconSelect = screen.getByLabelText('ECON101 target grade');
+    expect(
+      within(updatedEconSelect).getByRole('option', { name: 'H / Pass (60%)' }),
+    ).toBeInTheDocument();
+    expect(
+      within(updatedEconSelect).getByRole('option', { name: 'Custom (88%)' }),
+    ).toBeInTheDocument();
+  });
 });
 
 
