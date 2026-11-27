@@ -201,9 +201,22 @@ export default function App() {
   // Check URL for either `#view=<token>` (Live Read-Only Cloud Share) or `#share=...` (Compressed Snapshot)
   useEffect(() => {
     let cancelled = false;
+    let requestSeq = 0;
+
+    function clearActiveSharedViewIfNeeded() {
+      if (!sharedStateRef.current) return;
+      setPendingDelete((prev) =>
+        prev?.kind === 'save-shared-copy' ? null : prev,
+      );
+      setSandboxState(null);
+      setLiveShareTokenView(null);
+      setSharedState(null);
+    }
 
     async function checkUrlViewMode() {
       if (typeof window === 'undefined') return;
+      const mySeq = ++requestSeq;
+      const isCurrent = () => !cancelled && mySeq === requestSeq;
 
       const viewToken = extractLiveViewTokenFromUrl(window.location);
       if (viewToken) {
@@ -222,17 +235,21 @@ export default function App() {
 
         try {
           const remote = await fetchSharedView(viewToken);
-          if (!cancelled) {
+          if (isCurrent()) {
             if (remote.exists && remote.state) {
+              setPendingDelete(null);
+              setSandboxState(null);
               setLiveShareTokenView(viewToken);
               setSharedState(remote.state);
             } else {
               clearLiveViewFromUrl(window);
+              clearActiveSharedViewIfNeeded();
               showToast('This shared link is no longer active or was rotated.');
             }
           }
         } catch (err) {
-          if (!cancelled) {
+          if (isCurrent()) {
+            clearActiveSharedViewIfNeeded();
             showToast(err?.message || 'Could not load shared tracker.');
           }
         }
@@ -240,13 +257,20 @@ export default function App() {
       }
 
       const snapToken = extractShareTokenFromUrl(window.location);
-      if (!snapToken) return;
+      if (!snapToken) {
+        clearActiveSharedViewIfNeeded();
+        return;
+      }
+
       const decoded = await decodeShareSnapshot(snapToken);
-      if (!cancelled) {
+      if (isCurrent()) {
         if (decoded) {
+          setPendingDelete(null);
+          setSandboxState(null);
           setLiveShareTokenView(null);
           setSharedState(decoded);
         } else {
+          clearActiveSharedViewIfNeeded();
           showToast(
             'Shared snapshot link was invalid or incomplete; loaded local tracker.',
           );
@@ -256,9 +280,11 @@ export default function App() {
 
     checkUrlViewMode();
     window.addEventListener('hashchange', checkUrlViewMode);
+    window.addEventListener('popstate', checkUrlViewMode);
     return () => {
       cancelled = true;
       window.removeEventListener('hashchange', checkUrlViewMode);
+      window.removeEventListener('popstate', checkUrlViewMode);
     };
   }, [showToast]);
 
@@ -460,6 +486,9 @@ export default function App() {
   function handleExitSharedView() {
     clearShareParamsFromCurrentUrl(window);
     clearLiveViewFromUrl(window);
+    setPendingDelete((prev) =>
+      prev?.kind === 'save-shared-copy' ? null : prev,
+    );
     setSandboxState(null);
     setLiveShareTokenView(null);
     setSharedState(null);
@@ -472,6 +501,9 @@ export default function App() {
       const remote = await fetchSharedView(liveShareTokenView);
       if (remote.exists && remote.state) {
         setSharedState(remote.state);
+        setSandboxState((prev) =>
+          prev !== null ? structuredClone(remote.state) : null,
+        );
         showToast('Refreshed latest shared grades.');
       } else {
         showToast('This shared link was turned off or rotated.');
@@ -483,8 +515,9 @@ export default function App() {
     }
   }
 
-  function handleSaveSharedCopyLocally() {
+  function applySaveSharedCopyLocally() {
     if (!sharedState) return;
+    setPendingDelete(null);
     setSandboxState(null);
     const nowIso = new Date().toISOString();
     setDoc((prev) => {
@@ -504,7 +537,26 @@ export default function App() {
     clearLiveViewFromUrl(window);
     setLiveShareTokenView(null);
     setSharedState(null);
-    showToast('Saved shared courses into your tracker.');
+    showToast('Saved shared courses into your tracker.', { showUndo: true });
+  }
+
+  function handleSaveSharedCopyLocally() {
+    if (!sharedState) return;
+    const hasExistingCourses = state.terms.some(
+      (t) => (t.courses?.length || 0) > 0,
+    );
+    if (!hasExistingCourses && !syncSnapshot.user) {
+      applySaveSharedCopyLocally();
+      return;
+    }
+    setPendingDelete({
+      kind: 'save-shared-copy',
+      title: 'Replace Your Tracker Courses?',
+      message: syncSnapshot.user
+        ? 'Saving this shared copy will replace your current courses and sync them to your Google Cloud account. You can still Undo right after.'
+        : 'Saving this shared copy will replace the current courses in this browser. You can still Undo right after.',
+      confirmLabel: 'Replace My Courses',
+    });
   }
 
   // --- Cloud Sync & Auth Handlers ---
@@ -739,6 +791,10 @@ export default function App() {
 
   function confirmPendingDelete() {
     if (!pendingDelete) return;
+    if (pendingDelete.kind === 'save-shared-copy') {
+      applySaveSharedCopyLocally();
+      return;
+    }
     if (pendingDelete.kind === 'term') {
       const target = activeState.terms.find((t) => t.id === pendingDelete.termId);
       commitState((prev) => {
@@ -1117,6 +1173,7 @@ export default function App() {
       {showShareModal && (
         <ShareModal
           isSignedIn={Boolean(syncSnapshot.user)}
+          isSharedReadOnly={isSharedReadOnly}
           liveShareUrl={liveShareUrl}
           snapshotUrl={snapshotShareUrl}
           onEnableOrRotateLiveShare={async (isRotate) => {
@@ -1225,15 +1282,16 @@ export default function App() {
         />
       )}
 
-      {pendingDelete && !readOnly && (
-        <ConfirmDeleteModal
-          title={pendingDelete.title}
-          message={pendingDelete.message}
-          confirmLabel={pendingDelete.confirmLabel}
-          onConfirm={confirmPendingDelete}
-          onClose={() => setPendingDelete(null)}
-        />
-      )}
+      {pendingDelete &&
+        (!readOnly || pendingDelete.kind === 'save-shared-copy') && (
+          <ConfirmDeleteModal
+            title={pendingDelete.title}
+            message={pendingDelete.message}
+            confirmLabel={pendingDelete.confirmLabel}
+            onConfirm={confirmPendingDelete}
+            onClose={() => setPendingDelete(null)}
+          />
+        )}
 
       {toast && (
         <div className="toast" role="status" aria-live="polite">

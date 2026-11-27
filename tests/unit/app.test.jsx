@@ -3,6 +3,10 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { render, screen, within, fireEvent, waitFor, act } from '@testing-library/react';
 import { storageService } from '../../src/services/storage.js';
 
+const { mockGetDoc } = vi.hoisted(() => ({
+  mockGetDoc: vi.fn().mockResolvedValue({ exists: () => false, data: () => undefined }),
+}));
+
 // Mock Firebase service layer so React UI tests never open network sockets
 vi.mock('../../src/services/firebase.js', () => ({
   FIREBASE_CONFIG: { projectId: 'test-project' },
@@ -14,7 +18,7 @@ vi.mock('../../src/services/firebase.js', () => ({
     signInWithGooglePopup: vi.fn().mockResolvedValue({ user: null }),
     signOutAuth: vi.fn().mockResolvedValue(undefined),
     doc: (...segments) => ({ path: segments.join('/'), segments }),
-    getDoc: vi.fn().mockResolvedValue({ exists: () => false, data: () => undefined }),
+    getDoc: mockGetDoc,
     writeBatch: () => ({
       set: vi.fn(),
       delete: vi.fn(),
@@ -30,6 +34,8 @@ describe('Grade Tracker React Application (M1 + M1.1 + Firebase Cloud Sync)', ()
   beforeEach(() => {
     window.localStorage.clear();
     window.history.replaceState({}, '', '/');
+    mockGetDoc.mockReset();
+    mockGetDoc.mockResolvedValue({ exists: () => false, data: () => undefined });
   });
 
   it('renders generic initial tracker with sample courses, GPA metrics, grading scale, and no Import/Export clutter', () => {
@@ -367,5 +373,105 @@ describe('Grade Tracker React Application (M1 + M1.1 + Firebase Cloud Sync)', ()
       });
     }
   });
+
+  it('hardens shared-view back-navigation, What-If live refresh, ShareModal context, and Save Copy Locally confirmation (#16)', async () => {
+    const { createInitialState } = await import('../../src/domain/templates.js');
+    const token = 'A'.repeat(32);
+
+    const liveV1 = createInitialState();
+    liveV1.studentName = 'Shared Friend V1';
+    liveV1.terms[0].courses[0].code = 'ASTRO101';
+
+    const liveV2 = createInitialState();
+    liveV2.studentName = 'Shared Friend V2';
+    liveV2.terms[0].courses[0].code = 'ASTRO202';
+
+    let currentSharedPayload = liveV1;
+    mockGetDoc.mockImplementation(async (ref) => {
+      if (ref.path === `shares/${token}`) {
+        return {
+          exists: () => true,
+          data: () => ({
+            ownerUid: 'friend-uid',
+            stateJson: JSON.stringify(currentSharedPayload),
+            updatedAt: 'ts-1',
+          }),
+        };
+      }
+      return { exists: () => false, data: () => undefined };
+    });
+
+    window.history.replaceState({}, '', `/#view=${token}`);
+    render(<App />);
+
+    // 1. Enters Live Shared View
+    expect(
+      await screen.findByText(/Live Shared Grade Tracker/i),
+    ).toBeInTheDocument();
+    expect(screen.getByDisplayValue('Shared Friend V1')).toBeInTheDocument();
+    expect(screen.getByDisplayValue('ASTRO101')).toBeInTheDocument();
+
+    // 2. Opening Share while viewing someone else's share hides owner Live Link controls
+    fireEvent.click(screen.getByRole('button', { name: /^Share$/i }));
+    const shareDialog = await screen.findByRole('dialog', {
+      name: /Share Read-Only View/i,
+    });
+    expect(
+      within(shareDialog).queryByText(/Live Auto-Updating Link/i),
+    ).not.toBeInTheDocument();
+    expect(
+      within(shareDialog).getByText(/One-Time Point-in-Time Snapshot/i),
+    ).toBeInTheDocument();
+    fireEvent.click(
+      within(shareDialog).getByRole('button', { name: /Close share dialog/i }),
+    );
+
+    // 3. Turn on What-If Simulator and click `↻ Refresh` -> updates sandboxState too!
+    fireEvent.click(screen.getByRole('button', { name: /What-If Simulator/i }));
+    expect(screen.getByDisplayValue('ASTRO101')).toBeInTheDocument();
+
+    currentSharedPayload = liveV2;
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /↻ Refresh/i }));
+    });
+    expect(await screen.findByDisplayValue('ASTRO202')).toBeInTheDocument();
+
+    // Exit What-If Simulator
+    fireEvent.click(screen.getByRole('button', { name: /Exit Simulator/i }));
+
+    // 4. Navigating back to `#` via hashchange exits shared view cleanly
+    await act(async () => {
+      window.history.replaceState({}, '', '/');
+      window.dispatchEvent(new HashChangeEvent('hashchange'));
+    });
+    expect(
+      screen.queryByText(/Live Shared Grade Tracker/i),
+    ).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Tracker owner or label')).toHaveValue('My');
+
+    // 5. Re-enter `#view=` and verify `Save Copy Locally` requires confirmation before overwriting
+    await act(async () => {
+      window.history.replaceState({}, '', `/#view=${token}`);
+      window.dispatchEvent(new HashChangeEvent('hashchange'));
+    });
+    expect(
+      await screen.findByText(/Live Shared Grade Tracker/i),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /Save Copy Locally/i }));
+    const confirmDialog = screen.getByRole('alertdialog', {
+      name: /Replace Your Tracker Courses\?/i,
+    });
+    expect(storageService.load().studentName).toBe('My');
+
+    fireEvent.click(
+      within(confirmDialog).getByRole('button', { name: /Replace My Courses/i }),
+    );
+    expect(storageService.load().studentName).toBe('Shared Friend V2');
+    expect(screen.getByLabelText('Tracker owner or label')).toHaveValue(
+      'Shared Friend V2',
+    );
+  });
 });
+
 
