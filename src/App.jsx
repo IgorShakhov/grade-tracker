@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { DEFAULT_GRADE_SCALE } from './domain/constants.js';
 import {
+  createInitialState,
   createNewTerm,
   createNewCourse,
   createNewCategory,
@@ -29,7 +30,17 @@ import {
   extractLiveViewTokenFromUrl,
   clearLiveViewFromUrl,
   fetchSharedView,
+  areTrackerStatesEquivalent,
 } from './services/cloudSync.js';
+import {
+  applyAnalyticsToggleFromUrl,
+  initAnalytics,
+  trackEvent,
+  trackSessionStartOnce,
+  trackEngagedOnce,
+  bucketTermCount,
+  bucketCourseCount,
+} from './services/analytics.js';
 
 import HeaderLedger from './components/HeaderLedger.jsx';
 import TermTabs from './components/TermTabs.jsx';
@@ -43,6 +54,13 @@ import {
 import { CloudSyncModal, SyncConflictModal } from './components/SyncModals.jsx';
 
 const MAX_HISTORY = 30;
+const SAMPLE_TRACKER_STATE = createInitialState();
+
+function getAnalyticsAuthMode() {
+  return cloudSyncManager.getSnapshot().user || cloudSyncManager.meta?.lastSyncedUid
+    ? 'signed_in'
+    : 'guest';
+}
 const COALESCE_WINDOW_MS = 700;
 
 /**
@@ -193,6 +211,7 @@ export default function App() {
   const [liveShareTokenView, setLiveShareTokenView] = useState(null);
   const liveShareTokenViewRef = useRef(liveShareTokenView);
   const urlRequestSeqRef = useRef(0);
+  const pendingAnalyticsToggleRef = useRef(null);
   const [liveRefreshing, setLiveRefreshing] = useState(false);
 
   useEffect(() => {
@@ -206,6 +225,7 @@ export default function App() {
   const [simEpoch, setSimEpoch] = useState(0);
   const [showShareModal, setShowShareModal] = useState(false);
   const [snapshotShareUrl, setSnapshotShareUrl] = useState('');
+  const lastTrackedSnapshotUrlRef = useRef('');
   const [showScaleModal, setShowScaleModal] = useState(false);
   const [showSyncModal, setShowSyncModal] = useState(false);
   const [conflictDismissed, setConflictDismissed] = useState(false);
@@ -299,6 +319,57 @@ export default function App() {
   useEffect(() => {
     let cancelled = false;
 
+    let startupToggleMessage = '';
+    function formatAnalyticsToggleToast(outcome) {
+      return outcome === 'disabled'
+        ? 'Browser excluded from analytics on this device.'
+        : 'Analytics re-enabled on this device.';
+    }
+    function showStartupOrShareToast(message) {
+      const pendingOutcome = pendingAnalyticsToggleRef.current;
+      if (pendingOutcome === 'disabled' || pendingOutcome === 'enabled') {
+        startupToggleMessage = formatAnalyticsToggleToast(pendingOutcome);
+        pendingAnalyticsToggleRef.current = null;
+      }
+      showToast(
+        startupToggleMessage ? `${startupToggleMessage} ${message}` : message,
+      );
+    }
+
+    if (typeof window !== 'undefined') {
+      const toggleOutcome =
+        applyAnalyticsToggleFromUrl(window) || pendingAnalyticsToggleRef.current;
+      pendingAnalyticsToggleRef.current = toggleOutcome;
+      if (toggleOutcome === 'disabled' || toggleOutcome === 'enabled') {
+        queueMicrotask(() => {
+          if (!cancelled && pendingAnalyticsToggleRef.current) {
+            const consumed = pendingAnalyticsToggleRef.current;
+            pendingAnalyticsToggleRef.current = null;
+            startupToggleMessage = formatAnalyticsToggleToast(consumed);
+            showToast(startupToggleMessage);
+          }
+        });
+      }
+    }
+
+    function recordInitialSession(entryView, resolvedState) {
+      const s = resolvedState || stateRef.current;
+      const terms = Array.isArray(s?.terms) ? s.terms : [];
+      const totalCourses = terms.reduce(
+        (sum, t) => sum + (Array.isArray(t?.courses) ? t.courses.length : 0),
+        0,
+      );
+      trackSessionStartOnce({
+        auth_mode: getAnalyticsAuthMode(),
+        entry_view: entryView,
+        tracker_state: areTrackerStatesEquivalent(s, SAMPLE_TRACKER_STATE)
+          ? 'sample'
+          : 'customized',
+        term_bucket: bucketTermCount(terms.length),
+        course_bucket: bucketCourseCount(totalCourses),
+      });
+    }
+
     function clearActiveSharedViewIfNeeded() {
       if (!sharedStateRef.current) return;
       setPendingDelete(null);
@@ -317,17 +388,21 @@ export default function App() {
       const viewToken = extractLiveViewTokenFromUrl(window.location);
       if (viewToken) {
         // Normalize any legacy `?view=` query parameter into `#view=` fragment to avoid Referer/log exposure
-        if (window.location.search.includes('view=')) {
-          const normalized = buildLiveShareUrl(window.location.href, viewToken);
-          if (normalized && typeof window.history?.replaceState === 'function') {
-            const parsed = new URL(normalized);
-            window.history.replaceState(
-              window.history.state ?? null,
-              '',
-              `${parsed.pathname}${parsed.hash}`,
-            );
-          }
+        const viewSearchParams = new URLSearchParams(window.location.search);
+        if (
+          viewSearchParams.has('view') &&
+          typeof window.history?.replaceState === 'function'
+        ) {
+          const url = new URL(window.location.href);
+          url.searchParams.delete('view');
+          url.hash = `view=${encodeURIComponent(viewToken)}`;
+          window.history.replaceState(
+            window.history.state ?? null,
+            '',
+            `${url.pathname}${url.search}${url.hash}`,
+          );
         }
+        initAnalytics();
 
         try {
           const remote = await fetchSharedView(viewToken);
@@ -339,16 +414,23 @@ export default function App() {
               setSandboxState(null);
               setLiveShareTokenView(viewToken);
               setSharedState(remote.state);
+              recordInitialSession('live_share', remote.state);
             } else {
               clearLiveViewFromUrl(window);
               clearActiveSharedViewIfNeeded();
-              showToast('This shared link is no longer active or was rotated.');
+              showStartupOrShareToast(
+                'This shared link is no longer active or was rotated.',
+              );
+              recordInitialSession('own_tracker', stateRef.current);
             }
           }
         } catch (err) {
           if (isCurrent()) {
             clearActiveSharedViewIfNeeded();
-            showToast(err?.message || 'Could not load shared tracker.');
+            showStartupOrShareToast(
+              err?.message || 'Could not load shared tracker.',
+            );
+            recordInitialSession('own_tracker', stateRef.current);
           }
         }
         return;
@@ -356,7 +438,9 @@ export default function App() {
 
       const snapToken = extractShareTokenFromUrl(window.location);
       if (!snapToken) {
+        initAnalytics();
         clearActiveSharedViewIfNeeded();
+        recordInitialSession('own_tracker', stateRef.current);
         return;
       }
 
@@ -372,6 +456,7 @@ export default function App() {
           `${url.pathname}${url.search}${url.hash}`,
         );
       }
+      initAnalytics();
 
       const decoded = await decodeShareSnapshot(snapToken);
       if (isCurrent()) {
@@ -382,12 +467,14 @@ export default function App() {
           setSandboxState(null);
           setLiveShareTokenView(null);
           setSharedState(decoded);
+          recordInitialSession('snapshot_share', decoded);
         } else {
           clearShareParamsFromCurrentUrl(window);
           clearActiveSharedViewIfNeeded();
-          showToast(
+          showStartupOrShareToast(
             'Shared snapshot link was invalid or incomplete; loaded local tracker.',
           );
+          recordInitialSession('own_tracker', stateRef.current);
         }
       }
     }
@@ -426,8 +513,19 @@ export default function App() {
     setPendingDelete(null);
     setShowScaleModal(false);
     setSimEpoch((n) => n + 1);
+    if (!simMode) {
+      trackEvent('what_if_entered', {
+        auth_mode: getAnalyticsAuthMode(),
+        entry_view:
+          readOnlyMode === 'live-share'
+            ? 'live_share'
+            : readOnlyMode === 'snapshot'
+              ? 'snapshot_share'
+              : 'own_tracker',
+      });
+    }
     setSandboxState((prev) => (prev !== null ? null : structuredClone(baseState)));
-  }, [baseState]);
+  }, [baseState, simMode, readOnlyMode]);
 
   const handleResetSimulation = useCallback(() => {
     setPendingDelete(null);
@@ -447,8 +545,30 @@ export default function App() {
         notifyListeners: false,
         syncToCloud: shouldSyncCloud,
       });
+      if (shouldSyncCloud) {
+        trackEngagedOnce(getAnalyticsAuthMode());
+      }
     }
   }, [localSaveSeq, cloudSaveSeq, state]);
+
+  const lastTrackedConflictRef = useRef(null);
+  const activeConflictReason =
+    syncSnapshot.status === 'conflict' &&
+    syncSnapshot.conflict &&
+    !conflictDismissed
+      ? syncSnapshot.conflict.reason || 'rev-mismatch'
+      : null;
+  useEffect(() => {
+    if (
+      activeConflictReason &&
+      lastTrackedConflictRef.current !== activeConflictReason
+    ) {
+      lastTrackedConflictRef.current = activeConflictReason;
+      trackEvent('sync_conflict_shown', { reason: activeConflictReason });
+    } else if (!activeConflictReason) {
+      lastTrackedConflictRef.current = null;
+    }
+  }, [activeConflictReason]);
 
   const safePrepareForSave = useCallback((candidate, options) => {
     try {
@@ -718,6 +838,7 @@ export default function App() {
 
   function applySaveSharedCopyLocally() {
     if (!sharedState || schemaUpdateRequired) return;
+    const savedSource = liveShareTokenView ? 'live_share' : 'snapshot_share';
     const nowIso = new Date().toISOString();
     const prepared = safePrepareForSave(sharedState, {
       touchTimestamp: true,
@@ -744,6 +865,7 @@ export default function App() {
     clearLiveViewFromUrl(window);
     setLiveShareTokenView(null);
     setSharedState(null);
+    trackEvent('shared_copy_saved', { source: savedSource });
     showToast('Saved shared courses into your tracker.');
   }
 
@@ -783,8 +905,17 @@ export default function App() {
   }
 
   async function handleSignInGoogle() {
+    const hadPriorSync = Boolean(cloudSyncManager.meta?.lastSyncedUid);
     const snap = await cloudSyncManager.signInWithGoogle();
     if (snap.user) {
+      const signInKind =
+        snap.lastSignInKind === 'returning' ||
+        (snap.lastSignInKind == null && hadPriorSync)
+          ? 'returning'
+          : 'first_sync';
+      trackEvent('auth_sign_in', {
+        kind: signInKind,
+      });
       setShowSyncModal(false);
       if (snap.status === 'synced') {
         showToast('Signed in with Google and synced courses.');
@@ -799,6 +930,7 @@ export default function App() {
     if (result?.requiresDiscardConfirm) {
       return result;
     }
+    trackEvent('auth_sign_out');
     lastCoalesceRef.current = { key: null, time: 0 };
     setSandboxState(null);
     const loaded = storageService.load();
@@ -836,10 +968,20 @@ export default function App() {
   }
 
   async function handleCopyUrlText(urlText, label = 'Link copied to clipboard.') {
+    const isSnapshotCopy =
+      Boolean(snapshotShareUrl) && urlText === snapshotShareUrl;
     try {
       await navigator.clipboard.writeText(urlText);
+      if (isSnapshotCopy && lastTrackedSnapshotUrlRef.current !== snapshotShareUrl) {
+        lastTrackedSnapshotUrlRef.current = snapshotShareUrl;
+        trackEvent('share_created', { kind: 'snapshot_copied' });
+      }
       showToast(label);
     } catch {
+      if (isSnapshotCopy && lastTrackedSnapshotUrlRef.current !== snapshotShareUrl) {
+        lastTrackedSnapshotUrlRef.current = snapshotShareUrl;
+        trackEvent('share_created', { kind: 'snapshot_copied' });
+      }
       showToast('Select and copy the URL from the box.');
     }
   }
@@ -850,6 +992,7 @@ export default function App() {
     setShowSyncModal(false);
     setShowScaleModal(false);
     setPendingDelete(null);
+    lastTrackedSnapshotUrlRef.current = '';
     try {
       const token = await encodeShareSnapshot(baseState);
       const url = buildShareUrl(window.location.href, token);
@@ -891,6 +1034,9 @@ export default function App() {
         terms: [...prev.terms, newTerm],
       };
     });
+    if (!simMode && !isSharedReadOnly && !schemaUpdateRequired) {
+      trackEvent('term_added');
+    }
   }
 
   function handleRenameTerm(termId, newName) {
@@ -934,6 +1080,11 @@ export default function App() {
         return { ...t, courses: [...t.courses, created] };
       }),
     }));
+    if (!simMode && !isSharedReadOnly && !schemaUpdateRequired) {
+      trackEvent('course_added', {
+        source: mode === 'blank' ? 'blank' : 'standard',
+      });
+    }
   }
 
   function handleDuplicateFromSelect(sourceCourseId) {
@@ -951,6 +1102,9 @@ export default function App() {
         };
       }),
     }));
+    if (!simMode && !isSharedReadOnly && !schemaUpdateRequired) {
+      trackEvent('course_added', { source: 'duplicate' });
+    }
     showToast(`Duplicated structure from ${source.code}.`);
   }
 
@@ -1398,6 +1552,9 @@ export default function App() {
                   commitState((prev) =>
                     duplicateCourseInTerm(prev, activeTerm.id, course.id),
                   );
+                  if (!simMode && !isSharedReadOnly && !schemaUpdateRequired) {
+                    trackEvent('course_added', { source: 'duplicate' });
+                  }
                   showToast(`Duplicated ${course.code} structure.`);
                 }}
                 onDeleteCourse={() => requestDeleteCourse(course)}
@@ -1501,6 +1658,9 @@ export default function App() {
               const newToken = await cloudSyncManager.enableOrRotateShare(
                 stateRef.current,
               );
+              trackEvent('share_created', {
+                kind: isRotate ? 'live_rotated' : 'live_enabled',
+              });
               const nextUrl = buildLiveShareUrl(window.location.href, newToken);
               await handleCopyUrlText(
                 nextUrl,
@@ -1606,7 +1766,17 @@ export default function App() {
           gradeScale={gradeScale}
           onClose={() => setShowScaleModal(false)}
           onSaveScale={(nextScale) => {
+            const didChangeScale =
+              JSON.stringify(gradeScale) !== JSON.stringify(nextScale);
             commitState((prev) => ({ ...prev, gradeScale: nextScale }));
+            if (
+              didChangeScale &&
+              !simMode &&
+              !isSharedReadOnly &&
+              !schemaUpdateRequired
+            ) {
+              trackEvent('scale_customized');
+            }
             showToast(
               simMode
                 ? 'Updated grading scale in What-If sandbox.'

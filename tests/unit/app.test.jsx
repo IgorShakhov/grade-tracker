@@ -2,6 +2,12 @@ import { StrictMode } from 'react';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { render, screen, within, fireEvent, waitFor, act } from '@testing-library/react';
 import { storageService } from '../../src/services/storage.js';
+import { resetFirebasePreloadForTests } from '../../src/services/cloudSync.js';
+import {
+  initAnalytics,
+  resetAnalyticsForTests,
+  UMAMI_OPT_OUT_KEY,
+} from '../../src/services/analytics.js';
 
 const { mockGetDoc } = vi.hoisted(() => ({
   mockGetDoc: vi.fn().mockResolvedValue({ exists: () => false, data: () => undefined }),
@@ -34,6 +40,9 @@ describe('Grade Tracker React Application (M1 + M1.1 + Firebase Cloud Sync)', ()
   beforeEach(() => {
     window.localStorage.clear();
     window.history.replaceState({}, '', '/');
+    delete window.umami;
+    resetAnalyticsForTests(window);
+    resetFirebasePreloadForTests();
     mockGetDoc.mockReset();
     mockGetDoc.mockResolvedValue({ exists: () => false, data: () => undefined });
   });
@@ -337,8 +346,8 @@ describe('Grade Tracker React Application (M1 + M1.1 + Firebase Cloud Sync)', ()
     ).toBeInTheDocument();
 
     const origFactory = cloudSyncManager.firebaseFactory;
-    cloudSyncManager.firebaseFactory = () => ({
-      ...origFactory(),
+    cloudSyncManager.firebaseFactory = async () => ({
+      ...(await origFactory()),
       writeBatch: () => ({
         set: vi.fn(),
         delete: vi.fn(),
@@ -825,8 +834,8 @@ describe('Grade Tracker React Application (M1 + M1.1 + Firebase Cloud Sync)', ()
     const { cloudSyncManager } = await import('../../src/services/cloudSync.js');
     const commitSpy = vi.fn().mockResolvedValue(undefined);
     const origFactory = cloudSyncManager.firebaseFactory;
-    cloudSyncManager.firebaseFactory = () => ({
-      ...origFactory(),
+    cloudSyncManager.firebaseFactory = async () => ({
+      ...(await origFactory()),
       writeBatch: () => ({
         set: vi.fn(),
         delete: vi.fn(),
@@ -1423,5 +1432,294 @@ describe('Grade Tracker React Application (M1 + M1.1 + Firebase Cloud Sync)', ()
     fireEvent.click(screen.getByRole('tab', { name: 'Winter Term' }));
     expect(within(metricsRegion).getByText('Winter Term GPA')).toBeInTheDocument();
     expect(within(metricsRegion).getByText('Avg 72.0%')).toBeInTheDocument();
+  });
+
+  it('supports ?analytics=off browser exclusion and emits strictly anonymized once-per-session and feature counters under StrictMode (#104)', async () => {
+    // 1. Visiting ?analytics=off opts out locally, shows toast, and cleans query string
+    window.history.replaceState({}, '', '/grade-tracker/?analytics=off');
+    const firstRender = render(
+      <StrictMode>
+        <App />
+      </StrictMode>,
+    );
+    expect(window.localStorage.getItem(UMAMI_OPT_OUT_KEY)).toBe('1');
+    expect(window.location.search).toBe('');
+    await waitFor(() => {
+      expect(screen.getByRole('status')).toHaveTextContent(
+        /Browser excluded from analytics on this device\./i,
+      );
+    });
+    firstRender.unmount();
+
+    // 2. Clear opt-out and enable analytics with a mocked window.umami.track spy
+    window.localStorage.clear();
+    window.history.replaceState({}, '', '/grade-tracker/');
+    resetAnalyticsForTests(window);
+    const trackSpy = vi.fn();
+    window.umami = { track: trackSpy };
+    initAnalytics({
+      envObj: {
+        MODE: 'production',
+        VITE_UMAMI_WEBSITE_ID: '11111111-2222-4333-8444-555555555555',
+      },
+      win: window,
+      allowLocalhost: true,
+      allowTestMode: true,
+    });
+
+    render(
+      <StrictMode>
+        <App />
+      </StrictMode>,
+    );
+
+    // Even under StrictMode double-mount, session_start fires exactly once
+    expect(trackSpy).toHaveBeenCalledTimes(1);
+    expect(trackSpy).toHaveBeenNthCalledWith(1, 'session_start', {
+      auth_mode: 'guest',
+      entry_view: 'own_tracker',
+      tracker_state: 'sample',
+      term_bucket: '1',
+      course_bucket: '1-3',
+    });
+
+    // Editing multiple grade cells fires `tracker_engaged` ONLY once and leaks zero grade/course data
+    const ecoSection = screen.getByRole('region', { name: 'Course ECON101' });
+    const gradeInputs = within(ecoSection).getAllByLabelText(
+      /ECON101 .* grade percent/i,
+    );
+    fireEvent.focus(gradeInputs[0]);
+    fireEvent.change(gradeInputs[0], { target: { value: '91' } });
+    fireEvent.blur(gradeInputs[0]);
+    fireEvent.focus(gradeInputs[1]);
+    fireEvent.change(gradeInputs[1], { target: { value: '87' } });
+    fireEvent.blur(gradeInputs[1]);
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const engagedCalls = trackSpy.mock.calls.filter(
+      (c) => c[0] === 'tracker_engaged',
+    );
+    expect(engagedCalls).toEqual([
+      ['tracker_engaged', { auth_mode: 'guest' }],
+    ]);
+
+    // Entering What-If Simulator records `what_if_entered`, and hypothetical courses/terms inside sandbox do NOT emit real course/term events
+    fireEvent.click(screen.getByRole('button', { name: /What-If Simulator/i }));
+    expect(trackSpy).toHaveBeenCalledWith('what_if_entered', {
+      auth_mode: 'guest',
+      entry_view: 'own_tracker',
+    });
+    const callCountAfterWhatIf = trackSpy.mock.calls.length;
+    fireEvent.click(screen.getByRole('button', { name: /\+ Blank Course/i }));
+    fireEvent.click(screen.getByRole('button', { name: /\+ Add Term/i }));
+    expect(trackSpy.mock.calls.length).toBe(callCountAfterWhatIf);
+
+    // Exiting What-If and adding a real Blank Course + Term records `course_added` and `term_added`
+    fireEvent.click(screen.getByRole('button', { name: /Exit Simulator/i }));
+    fireEvent.click(screen.getByRole('button', { name: /\+ Blank Course/i }));
+    fireEvent.click(screen.getByRole('button', { name: /\+ Add Term/i }));
+    expect(trackSpy).toHaveBeenCalledWith('course_added', { source: 'blank' });
+    expect(trackSpy).toHaveBeenCalledWith('term_added');
+
+    // Saving Grading Scale without changes does NOT emit `scale_customized`; changing a band DOES emit `scale_customized`
+    fireEvent.click(screen.getByRole('button', { name: /Customize/i }));
+    let scaleDialog = screen.getByRole('dialog', {
+      name: /Customize Grading Scale/i,
+    });
+    fireEvent.click(
+      within(scaleDialog).getByRole('button', { name: /Save Scale/i }),
+    );
+    expect(trackSpy).not.toHaveBeenCalledWith('scale_customized');
+
+    fireEvent.click(screen.getByRole('button', { name: /Customize/i }));
+    scaleDialog = screen.getByRole('dialog', {
+      name: /Customize Grading Scale/i,
+    });
+    const scaleLetterInputs = within(scaleDialog).getAllByRole('textbox');
+    fireEvent.change(scaleLetterInputs[0], { target: { value: 'A++' } });
+    fireEvent.click(
+      within(scaleDialog).getByRole('button', { name: /Save Scale/i }),
+    );
+    expect(trackSpy).toHaveBeenCalledWith('scale_customized');
+
+    // Copying Snapshot link deduplicates repeated clicks within the same open ShareModal
+    Object.assign(navigator, {
+      clipboard: { writeText: vi.fn().mockResolvedValue(undefined) },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /^Share$/i }));
+    const shareDialog = await screen.findByRole('dialog', {
+      name: /Share Read-Only View/i,
+    });
+    const copySnapBtn = within(shareDialog).getByRole('button', {
+      name: /Copy Snapshot/i,
+    });
+    await act(async () => {
+      fireEvent.click(copySnapBtn);
+      fireEvent.click(copySnapBtn);
+      await Promise.resolve();
+    });
+    expect(
+      trackSpy.mock.calls.filter(
+        (c) => c[0] === 'share_created' && c[1]?.kind === 'snapshot_copied',
+      ),
+    ).toHaveLength(1);
+    fireEvent.keyDown(document, { key: 'Escape' });
+  });
+
+  it('tracks snapshot_share entry, shared_copy_saved, returning vs first_sync auth_sign_in, auth_sign_out, sync_conflict_shown, and combined ?analytics=off#view=<rotated> toast (#104)', async () => {
+    const { cloudSyncManager } = await import('../../src/services/cloudSync.js');
+    const { encodeShareSnapshot } = await import('../../src/services/share.js');
+    const { createInitialState } = await import('../../src/domain/templates.js');
+
+    // 1. Combined ?analytics=off#view=<rotatedToken> preserves BOTH notices in the toast
+    window.history.replaceState(
+      {},
+      '',
+      '/grade-tracker/?analytics=off#view=rotatedToken123456789012',
+    );
+    const combinedRender = render(
+      <StrictMode>
+        <App />
+      </StrictMode>,
+    );
+    await waitFor(() => {
+      const statusEl = screen.getByRole('status');
+      expect(statusEl).toHaveTextContent(
+        /Browser excluded from analytics on this device\./i,
+      );
+      expect(statusEl).toHaveTextContent(
+        /This shared link is no longer active or was rotated\./i,
+      );
+    });
+    combinedRender.unmount();
+
+    // 2. Snapshot share entry + Save Copy Locally + Cloud Sign-In (returning) + Conflict + Sign-Out
+    window.localStorage.clear();
+    resetAnalyticsForTests(window);
+    const sharedSample = createInitialState();
+    sharedSample.studentName = 'Shared Peer';
+    const snapToken = await encodeShareSnapshot(sharedSample);
+    window.history.replaceState({}, '', `/grade-tracker/#share=${snapToken}`);
+
+    const trackSpy = vi.fn();
+    window.umami = { track: trackSpy };
+    initAnalytics({
+      envObj: {
+        MODE: 'production',
+        VITE_UMAMI_WEBSITE_ID: '11111111-2222-4333-8444-555555555555',
+      },
+      win: window,
+      allowLocalhost: true,
+      allowTestMode: true,
+    });
+
+    const origFactory = cloudSyncManager.firebaseFactory;
+    const remoteExisting = createInitialState();
+    remoteExisting.studentName = 'Existing Cloud Ledger';
+    cloudSyncManager.firebaseFactory = async () => ({
+      ...(await origFactory()),
+      signInWithGooglePopup: vi.fn().mockResolvedValue({
+        user: { uid: 'u-returning', email: 'r@example.com' },
+      }),
+      getDoc: vi.fn().mockResolvedValue({
+        exists: () => true,
+        data: () => ({
+          rev: 1,
+          shareToken: null,
+          stateJson: JSON.stringify(remoteExisting),
+        }),
+      }),
+    });
+
+    try {
+      render(
+        <StrictMode>
+          <App />
+        </StrictMode>,
+      );
+
+      await waitFor(() => {
+        expect(screen.getByDisplayValue('Shared Peer')).toBeInTheDocument();
+      });
+      expect(trackSpy).toHaveBeenCalledWith('session_start', {
+        auth_mode: 'guest',
+        entry_view: 'snapshot_share',
+        tracker_state: 'customized',
+        term_bucket: '1',
+        course_bucket: '1-3',
+      });
+
+      // Save Copy Locally opens confirmation dialog first (does NOT emit before confirm), then emits `shared_copy_saved` upon confirm
+      fireEvent.click(
+        screen.getByRole('button', { name: /Save Copy Locally/i }),
+      );
+      expect(trackSpy).not.toHaveBeenCalledWith(
+        'shared_copy_saved',
+        expect.anything(),
+      );
+      fireEvent.click(
+        screen.getByRole('button', { name: /Replace My Courses/i }),
+      );
+      expect(trackSpy).toHaveBeenCalledWith('shared_copy_saved', {
+        source: 'snapshot_share',
+      });
+
+      // Sign in on fresh browser (`lastSyncedUid === null`) where `users/{uid}` ALREADY exists in Firestore -> classifies as `returning` AND surfaces `initial-merge` conflict!
+      fireEvent.click(screen.getByRole('button', { name: /^Sign In$/i }));
+      const syncDialog = screen.getByRole('dialog');
+      await act(async () => {
+        fireEvent.click(
+          within(syncDialog).getByRole('button', {
+            name: /Sign in with Google/i,
+          }),
+        );
+        await Promise.resolve();
+      });
+
+      await waitFor(() => {
+        expect(trackSpy).toHaveBeenCalledWith('auth_sign_in', {
+          kind: 'returning',
+        });
+      });
+      expect(trackSpy).toHaveBeenCalledWith('sync_conflict_shown', {
+        reason: 'initial-merge',
+      });
+
+      // Dismiss conflict and Sign Out -> emits `auth_sign_out`
+      act(() => {
+        cloudSyncManager.conflict = null;
+        cloudSyncManager.status = 'synced';
+        cloudSyncManager.saveMeta({
+          lastSyncedUid: 'u-returning',
+          lastSyncedRev: 1,
+          dirty: false,
+        });
+        cloudSyncManager.emit();
+      });
+      fireEvent.click(
+        screen.getByTitle(/Google Account & Multi-Device Sync/i),
+      );
+      const acctDialog = screen.getByRole('dialog');
+      await act(async () => {
+        fireEvent.click(
+          within(acctDialog).getByRole('button', { name: /^Sign Out$/i }),
+        );
+        await Promise.resolve();
+      });
+      expect(trackSpy).toHaveBeenCalledWith('auth_sign_out');
+    } finally {
+      cloudSyncManager.cancelDebounce();
+      cloudSyncManager.firebaseFactory = origFactory;
+      act(() => {
+        cloudSyncManager.currentUser = null;
+        cloudSyncManager.conflict = null;
+        cloudSyncManager.status = 'disconnected';
+        cloudSyncManager.clearMeta();
+        cloudSyncManager.emit();
+      });
+    }
   });
 });

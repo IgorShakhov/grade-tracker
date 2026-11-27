@@ -18,7 +18,7 @@ Read this file and [`docs/ROADMAP.md`](docs/ROADMAP.md) first before modifying t
 
 ```text
 .
-├── .env.example                      # Template for VITE_FIREBASE_* build-time env vars (.env.local gitignored)
+├── .env.example                      # Template for VITE_FIREBASE_* & optional VITE_UMAMI_* env vars (.env.local gitignored)
 ├── .firebaserc                       # Firebase project alias (default -> grade-tracker-sync) for rules deploys
 ├── firebase.json                     # Firebase CLI config mapping firestore.rules
 ├── index.html                        # Entry HTML, no-referrer policy, strict meta CSP, <noscript> fallback, SVG icon
@@ -36,7 +36,8 @@ Read this file and [`docs/ROADMAP.md`](docs/ROADMAP.md) first before modifying t
 │   │   ├── storage.js                # validateTrackerState, schema gating, corrupt-load salvage, StorageService
 │   │   ├── firebase.js               # On-demand chunk: VITE_FIREBASE_* env resolver + Auth (Google popup) & Firestore Lite
 │   │   ├── cloudSync.js              # CloudSyncManager: lazy import('./firebase.js'), atomic writeBatch sync, rev concurrency
-│   │   └── share.js                  # CompressionStream ('z1.') / base64url ('u1.') point-in-time URL snapshot codec
+│   │   ├── share.js                  # CompressionStream ('z1.') / base64url ('u1.') point-in-time URL snapshot codec
+│   │   └── analytics.js              # Optional cookie-free Umami analytics: enum allowlist, URL/referrer token stripping, ?analytics=off
 │   ├── components/
 │   │   ├── HeaderLedger.jsx          # Owner input, Sync status pill, Undo/Redo, What-If, Sign In / Account, Share
 │   │   ├── TermTabs.jsx              # ARIA tablist (ArrowLeft/Right/Home/End + F2 rename), delete trigger, Collapse/Expand All
@@ -55,6 +56,7 @@ Read this file and [`docs/ROADMAP.md`](docs/ROADMAP.md) first before modifying t
 │   ├── rules/
 │   │   └── firestore.rules.test.mjs  # Real Java Cloud Firestore Emulator REST security rules test suite
 │   └── unit/
+│       ├── analytics.test.js         # URL/referrer token stripping, enum-only event schema, opt-out & adblocker resilience
 │       ├── calculations.test.js      # Weighted math, rounding, custom scales, Pass/Fail, target & timezone edge cases
 │       ├── share.test.js             # Compressed URL snapshot round-trips & malformed token safety
 │       ├── storage.test.js           # Schema validation, version gating, corrupt-load salvage & rolling backups
@@ -102,6 +104,7 @@ Read this file and [`docs/ROADMAP.md`](docs/ROADMAP.md) first before modifying t
    - **Shared-Computer, Multi-Tab & Cloud-Delete Safety**: `grade_tracker_sync_meta_v1` tracks `lastSyncedUid` and `lastSyncedRev`. Signing out flushes pending online edits first (prompting before discarding offline/unsynced changes), then wipes `grade_tracker_v1`, sync metadata, and Undo/Redo state across all open tabs (`storage` + `onAuthStateChanged(null)`). If an active session is lost involuntarily (`onAuthStateChanged(null)` while `meta.dirty` is `true`, e.g. revoked token), `CloudSyncManager` saves `grade_tracker_v1_unsynced_backup` before wiping and restores/reconciles it on the user's next sign-in (`#46`). Pre-existing custom local courses trigger `'initial-merge'` instead of silent overwrite; another account's leftover local edits trigger `'account-switch'`; and if **Delete Cloud Data** is run on one device while another device is still signed in at `lastSyncedRev > 0`, the second device surfaces a `'remote-deleted'` prompt (**Sign Out & Clear** vs **Re-Upload Courses**) rather than silently recreating `users/{uid}`.
    - **Schema Version Gating & Corrupt-Load Salvage (`src/services/storage.js`)**: `validateTrackerState` enforces `CURRENT_SCHEMA_VERSION` (`1`) with forward migrations (`SCHEMA_MIGRATIONS`) and throws `SchemaTooNewError` (`storage/schema-too-new`) when `raw.version > CURRENT_SCHEMA_VERSION` so older clients pause editing and refuse to overwrite `localStorage` or push stripped documents to Firestore (`#37`). On local JSON/validation corruption, `StorageService.load()` preserves a rolling raw backup (`grade_tracker_v1_corrupt_<timestamp>`), salvages valid sibling courses/categories, and surfaces a recovery notice with raw backup export (`#36`).
    - **XSS, Self-Hosted Assets & Origin Hardening (`#53`)**: Never use `dangerouslySetInnerHTML`. Every remote `stateJson` (both `users/{uid}` and `shares/{token}`) must pass `validateTrackerState` before entering React state. `index.html` ships self-hosted fonts (zero third-party font requests), `<meta name="referrer" content="no-referrer" />`, `<noscript>` fallback, and a strict `<meta http-equiv="Content-Security-Policy" ...>`. Note that all GitHub Pages apps under `<owner>.github.io/*` share one browser origin, so never deploy untrusted third-party JS under the same GitHub Pages account.
+   - **Privacy-First Anonymized Analytics (`src/services/analytics.js`, `#104`)**: Optional cookie-free Umami Cloud analytics is enabled only when `VITE_UMAMI_WEBSITE_ID` is a valid UUID on non-`localhost`, non-`test` builds without `Do Not Track` / `Global Privacy Control` or local opt-out (`?analytics=off` -> `localStorage['umami.disabled'] = '1'` plus in-memory fallback; `?analytics=on` clears it). `sanitizeUmamiPayload` (`beforeSend`) strips `?search` and `#hash` (`#view=`, `#share=`, `?view=`, `?share=`) from both `payload.url` (pathname-only) and `payload.referrer`, blocks non-`event` beacon types, clamps `payload.title`, and enforces the frozen `EVENT_SCHEMA` enum allowlist so student names, course codes/titles, grades, emails, UIDs, and share tokens can never leave the browser. Custom self-hosted `VITE_UMAMI_SCRIPT_URL` origins outside `https://cloud.umami.is` require adding that origin to `script-src` and `connect-src` in `index.html`.
 
 ---
 
