@@ -1193,4 +1193,123 @@ describe('Grade Tracker React Application (M1 + M1.1 + Firebase Cloud Sync)', ()
     expect(ruleMatch).not.toBeNull();
     expect(ruleMatch[1]).toMatch(/display:\s*block\s*;/);
   });
+
+  it('restores non-inert app state and origin trigger focus across modal-to-modal hand-offs (#74) while keeping .toast-live-region non-inert (#75)', async () => {
+    const { cloudSyncManager } = await import('../../src/services/cloudSync.js');
+    const { createInitialState } = await import('../../src/domain/templates.js');
+    const { container } = render(
+      <StrictMode>
+        <App />
+      </StrictMode>,
+    );
+
+    const appRoot = container.querySelector('.app-root');
+    const headerEl = container.querySelector('header');
+    const mainEl = container.querySelector('main');
+    const shareBtn = screen.getByRole('button', { name: /^Share$/i });
+
+    // 1. Flow A: ShareModal -> "Sign in with Google to Enable Live Link" -> CloudSyncModal -> Close
+    shareBtn.focus();
+    fireEvent.click(shareBtn);
+    const shareDialog = await screen.findByRole('dialog', {
+      name: /Share Read-Only View/i,
+    });
+
+    // While modal is open, header & main are inert, whereas .toast-live-region stays non-inert (#75)
+    expect(Boolean(headerEl.inert)).toBe(true);
+    expect(Boolean(mainEl.inert)).toBe(true);
+    const toastRegion = container.querySelector('.toast-live-region');
+    expect(toastRegion).not.toBeNull();
+    expect(Boolean(toastRegion.inert)).toBe(false);
+    expect(toastRegion.closest('[inert]')).toBeNull();
+
+    // Hand off from ShareModal directly to CloudSyncModal in the same commit
+    fireEvent.click(
+      within(shareDialog).getByRole('button', {
+        name: /Sign in with Google to Enable Live Link/i,
+      }),
+    );
+    expect(
+      screen.queryByRole('dialog', { name: /Share Read-Only View/i }),
+    ).not.toBeInTheDocument();
+    const syncDialog = screen.getByRole('dialog');
+    expect(Boolean(headerEl.inert)).toBe(true);
+    expect(Boolean(mainEl.inert)).toBe(true);
+    expect(toastRegion.closest('[inert]')).toBeNull();
+
+    // Close CloudSyncModal -> zero [inert] elements remain and focus returns to original Share button!
+    fireEvent.click(
+      within(syncDialog).getByRole('button', { name: /Close account dialog/i }),
+    );
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(Boolean(headerEl.inert)).toBe(false);
+    expect(Boolean(mainEl.inert)).toBe(false);
+    expect(
+      Array.from(appRoot.querySelectorAll('*')).some((el) => Boolean(el.inert)),
+    ).toBe(false);
+    expect(document.activeElement).toBe(shareBtn);
+
+    // 2. Flow B: Sign In -> CloudSyncModal -> initial-merge SyncConflictModal hand-off -> Resolve
+    const signInBtn = screen.getByRole('button', { name: /^Sign In$/i });
+    signInBtn.focus();
+    fireEvent.click(signInBtn);
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+
+    const origResolveConflict = cloudSyncManager.resolveConflict.bind(cloudSyncManager);
+    cloudSyncManager.resolveConflict = vi.fn(async () => {
+      cloudSyncManager.conflict = null;
+      cloudSyncManager.status = 'synced';
+      cloudSyncManager.emit();
+      return cloudSyncManager.getSnapshot();
+    });
+
+    try {
+      const remoteState = createInitialState();
+      remoteState.studentName = 'Cloud Student';
+      act(() => {
+        cloudSyncManager.currentUser = {
+          uid: 'u-handoff',
+          email: 'u@example.com',
+          displayName: 'User',
+        };
+        cloudSyncManager.status = 'conflict';
+        cloudSyncManager.conflict = {
+          reason: 'initial-merge',
+          remoteState,
+          remoteRev: 1,
+          remoteShareToken: null,
+        };
+        cloudSyncManager.emit();
+      });
+
+      const conflictDialog = await screen.findByRole('alertdialog', {
+        name: /Cloud Sync Version Conflict/i,
+      });
+      expect(Boolean(mainEl.inert)).toBe(true);
+
+      fireEvent.click(
+        within(conflictDialog).getByRole('button', {
+          name: /Keep This Device/i,
+        }),
+      );
+
+      await waitFor(() => {
+        expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+      });
+      expect(Boolean(headerEl.inert)).toBe(false);
+      expect(Boolean(mainEl.inert)).toBe(false);
+      expect(
+        Array.from(appRoot.querySelectorAll('*')).some((el) => Boolean(el.inert)),
+      ).toBe(false);
+    } finally {
+      cloudSyncManager.resolveConflict = origResolveConflict;
+      act(() => {
+        cloudSyncManager.currentUser = null;
+        cloudSyncManager.conflict = null;
+        cloudSyncManager.status = 'disconnected';
+        cloudSyncManager.clearMeta();
+        cloudSyncManager.emit();
+      });
+    }
+  });
 });
