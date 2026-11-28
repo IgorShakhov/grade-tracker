@@ -24,6 +24,14 @@ function clampFinite(value, fallback = 0) {
   return value > 0 ? Number.MAX_VALUE : -Number.MAX_VALUE;
 }
 
+const CANONICAL_SCALE_TIERS = new Set([
+  'tier-a',
+  'tier-b',
+  'tier-c',
+  'tier-d',
+  'tier-f',
+]);
+
 export function deriveTierFromGpa(gpa) {
   if (typeof gpa !== 'number' || !Number.isFinite(gpa)) return 'tier-none';
   if (gpa >= 3.7) return 'tier-a';
@@ -31,6 +39,29 @@ export function deriveTierFromGpa(gpa) {
   if (gpa >= 1.7) return 'tier-c';
   if (gpa >= 0.7) return 'tier-d';
   return 'tier-f';
+}
+
+export function deriveBandTier(band, scaleMaxGpa = 4.0) {
+  const rawTier = typeof band?.tier === 'string' ? band.tier.trim() : '';
+  const letter = typeof band?.letter === 'string' ? band.letter.trim() : '';
+  const gpa = typeof band?.gpa === 'number' && Number.isFinite(band.gpa) ? band.gpa : 0;
+  const maxGpa =
+    typeof scaleMaxGpa === 'number' && Number.isFinite(scaleMaxGpa) && scaleMaxGpa > 0
+      ? scaleMaxGpa
+      : 4.0;
+
+  if (/^A(?:[+-])?$/i.test(letter)) return 'tier-a';
+  if (/^B(?:[+-])?$/i.test(letter)) return 'tier-b';
+  if (/^C(?:[+-])?$/i.test(letter)) return 'tier-c';
+  if (/^D(?:[+-])?$/i.test(letter)) return 'tier-d';
+  if (/^(?:F|E|NC|NP)$/i.test(letter)) return 'tier-f';
+
+  if (CANONICAL_SCALE_TIERS.has(rawTier) && maxGpa <= 4.5) {
+    return rawTier;
+  }
+
+  const normalizedGpa = maxGpa > 4.5 ? (gpa / maxGpa) * 4.0 : gpa;
+  return deriveTierFromGpa(normalizedGpa);
 }
 
 /**
@@ -246,12 +277,20 @@ export function lookupGrade(percentage, gradeScale = DEFAULT_GRADE_SCALE) {
   );
   const compareScore = hasDecimalMins ? clamped + 1e-9 : rounded;
 
+  let scaleMaxGpa = 0;
+  for (const r of activeScale) {
+    if (typeof r?.gpa === 'number' && Number.isFinite(r.gpa) && r.gpa > scaleMaxGpa) {
+      scaleMaxGpa = r.gpa;
+    }
+  }
+  if (scaleMaxGpa <= 0) scaleMaxGpa = 4.0;
+
   for (const row of activeScale) {
     if (compareScore >= row.min) {
       return {
         letter: row.letter,
         gpa: row.gpa,
-        tier: row.tier || deriveTierFromGpa(row.gpa),
+        tier: deriveBandTier(row, scaleMaxGpa),
         roundedPct: rounded,
       };
     }
@@ -367,19 +406,136 @@ function computeCategoryTotals(course, simGrades = null) {
       : 0;
     rawTotalWeight += w;
 
-    const hasRealGrade = typeof cat?.grade === 'number' && Number.isFinite(cat.grade);
-    const hasSimOverride = Boolean(
-      simGrades && cat && Object.prototype.hasOwnProperty.call(simGrades, cat.id),
-    );
-    const simVal = hasSimOverride ? simGrades[cat.id] : undefined;
-    const simCleared = hasSimOverride && simVal === null;
-    const hasValidSimNum = hasSimOverride && typeof simVal === 'number' && Number.isFinite(simVal);
-    const hasSimGrade = hasValidSimNum || (simCleared && hasRealGrade);
+    const rawSubItems = Array.isArray(cat?.items) ? cat.items : [];
+    const hasSubItems = rawSubItems.length > 0;
+    const configuredDropLowest =
+      typeof cat?.dropLowest === 'number' &&
+      Number.isInteger(cat.dropLowest) &&
+      cat.dropLowest > 0
+        ? cat.dropLowest
+        : 0;
 
-    const rawEffective = hasValidSimNum
-      ? simVal
-      : (simCleared ? null : (hasRealGrade ? cat.grade : null));
-    const effectiveGrade = rawEffective === 0 ? 0 : rawEffective;
+    let effectiveGrade = null;
+    let hasSimGrade = false;
+    let subItemBreakdowns = [];
+    let effectiveDropCount = 0;
+    let gradedSubItemCount = 0;
+    let keptSubItemCount = 0;
+
+    if (hasSubItems) {
+      const evaluatedSubs = rawSubItems.map((sub, idx) => {
+        const hasRealSub = typeof sub?.grade === 'number' && Number.isFinite(sub.grade);
+        const hasSimSubOverride = Boolean(
+          simGrades && sub && Object.prototype.hasOwnProperty.call(simGrades, sub.id),
+        );
+        const simSubVal = hasSimSubOverride ? simGrades[sub.id] : undefined;
+        const simSubCleared = hasSimSubOverride && simSubVal === null;
+        const hasValidSimSub =
+          hasSimSubOverride && typeof simSubVal === 'number' && Number.isFinite(simSubVal);
+        const subIsSimulated = hasValidSimSub || (simSubCleared && hasRealSub);
+        if (subIsSimulated) hasSimGrade = true;
+
+        const rawSubEff = hasValidSimSub
+          ? simSubVal
+          : simSubCleared
+            ? null
+            : hasRealSub
+              ? sub.grade
+              : null;
+        const subEffective = rawSubEff === 0 ? 0 : rawSubEff;
+        return {
+          ...sub,
+          idx,
+          effectiveGrade: subEffective,
+          isGraded: subEffective !== null,
+          isSimulated: subIsSimulated,
+        };
+      });
+
+      const gradedSubs = evaluatedSubs.filter((s) => s.isGraded);
+      gradedSubItemCount = gradedSubs.length;
+
+      if (gradedSubItemCount > 0) {
+        effectiveDropCount = Math.min(
+          configuredDropLowest,
+          Math.max(0, gradedSubItemCount - 1),
+        );
+        const sortedAsc = [...gradedSubs].sort(
+          (a, b) => a.effectiveGrade - b.effectiveGrade || a.idx - b.idx,
+        );
+        const droppedIdxSet = new Set(
+          sortedAsc.slice(0, effectiveDropCount).map((s) => s.idx),
+        );
+        const keptSubs = gradedSubs.filter((s) => !droppedIdxSet.has(s.idx));
+        keptSubItemCount = keptSubs.length;
+
+        let keptSum = 0;
+        let maxAbsSub = 0;
+        for (const k of keptSubs) {
+          keptSum += k.effectiveGrade;
+          const absVal = Math.abs(k.effectiveGrade);
+          if (absVal > maxAbsSub) maxAbsSub = absVal;
+        }
+        let subMean = keptSubs.length > 0 ? keptSum / keptSubs.length : null;
+        if (subMean !== null && !Number.isFinite(subMean) && maxAbsSub > 0) {
+          let scaledSum = 0;
+          for (const k of keptSubs) {
+            scaledSum += k.effectiveGrade / maxAbsSub;
+          }
+          subMean = (scaledSum / keptSubs.length) * maxAbsSub;
+        }
+        if (subMean !== null && Number.isFinite(subMean)) {
+          effectiveGrade = subMean === 0 ? 0 : subMean;
+        }
+
+        subItemBreakdowns = evaluatedSubs.map(({ idx, ...rest }) => ({
+          ...rest,
+          isDropped: droppedIdxSet.has(idx),
+        }));
+      } else {
+        subItemBreakdowns = evaluatedSubs.map((s) => {
+          const copy = { ...s, isDropped: false };
+          delete copy.idx;
+          return copy;
+        });
+      }
+
+      // Optional category-level simGrades override if caller explicitly targets cat.id
+      if (
+        simGrades &&
+        cat &&
+        Object.prototype.hasOwnProperty.call(simGrades, cat.id)
+      ) {
+        const simCatVal = simGrades[cat.id];
+        if (simCatVal === null) {
+          if (effectiveGrade !== null) hasSimGrade = true;
+          effectiveGrade = null;
+        } else if (typeof simCatVal === 'number' && Number.isFinite(simCatVal)) {
+          effectiveGrade = simCatVal === 0 ? 0 : simCatVal;
+          hasSimGrade = true;
+        }
+      }
+    } else {
+      const hasRealGrade = typeof cat?.grade === 'number' && Number.isFinite(cat.grade);
+      const hasSimOverride = Boolean(
+        simGrades && cat && Object.prototype.hasOwnProperty.call(simGrades, cat.id),
+      );
+      const simVal = hasSimOverride ? simGrades[cat.id] : undefined;
+      const simCleared = hasSimOverride && simVal === null;
+      const hasValidSimNum =
+        hasSimOverride && typeof simVal === 'number' && Number.isFinite(simVal);
+      hasSimGrade = hasValidSimNum || (simCleared && hasRealGrade);
+
+      const rawEffective = hasValidSimNum
+        ? simVal
+        : simCleared
+          ? null
+          : hasRealGrade
+            ? cat.grade
+            : null;
+      effectiveGrade = rawEffective === 0 ? 0 : rawEffective;
+    }
+
     let contribution = null;
 
     if (w > 0) {
@@ -415,6 +571,12 @@ function computeCategoryTotals(course, simGrades = null) {
       effectiveGrade,
       isSimulated: hasSimGrade,
       contribution,
+      hasSubItems,
+      subItemBreakdowns,
+      configuredDropLowest,
+      effectiveDropCount,
+      gradedSubItemCount,
+      keptSubItemCount,
     };
   });
 
@@ -890,14 +1052,6 @@ export function calculateAggregateStats(courses, simGrades = null, gradeScale = 
   };
 }
 
-const CANONICAL_SCALE_TIERS = new Set([
-  'tier-a',
-  'tier-b',
-  'tier-c',
-  'tier-d',
-  'tier-f',
-]);
-
 /**
  * Compute term-by-term GPA progression (both Term GPA and running Cumulative GPA)
  * and graded course tier distribution across the active grading scale (#102).
@@ -909,15 +1063,19 @@ export function calculateGpaVisuals(state, simGrades = null) {
   const terms = Array.isArray(state?.terms) ? state.terms : [];
 
   let scaleMaxGpa = 0;
-  const tierGroups = new Map();
-
   for (const band of gradeScale) {
     const bandGpa = typeof band?.gpa === 'number' && Number.isFinite(band.gpa) ? band.gpa : 0;
     if (bandGpa > scaleMaxGpa) {
       scaleMaxGpa = bandGpa;
     }
-    const rawTier = typeof band?.tier === 'string' ? band.tier.trim() : '';
-    const tierKey = CANONICAL_SCALE_TIERS.has(rawTier) ? rawTier : deriveTierFromGpa(bandGpa);
+  }
+  if (scaleMaxGpa <= 0) {
+    scaleMaxGpa = 4.0;
+  }
+
+  const tierGroups = new Map();
+  for (const band of gradeScale) {
+    const tierKey = deriveBandTier(band, scaleMaxGpa);
     if (!tierGroups.has(tierKey)) {
       tierGroups.set(tierKey, {
         key: tierKey,
@@ -935,10 +1093,6 @@ export function calculateGpaVisuals(state, simGrades = null) {
     if (!group.letters.includes(letter)) {
       group.letters.push(letter);
     }
-  }
-
-  if (scaleMaxGpa <= 0) {
-    scaleMaxGpa = 4.0;
   }
 
   const termSeries = [];

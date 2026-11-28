@@ -1,12 +1,21 @@
 import { describe, it, expect } from 'vitest';
 import { createInitialState, createNewTerm } from '../../src/domain/templates.js';
 import {
+  deriveSubItemLabel,
   reorderArray,
   reorderCoursesInTerm,
   reorderCategoriesInCourse,
   moveCourseToTerm,
   duplicateCourseInTerm,
   setAllCoursesCollapsed,
+  splitCategoryIntoSubItems,
+  collapseCategoryToSingleScore,
+  addSubItemToCategory,
+  updateSubItemInCategory,
+  deleteSubItemFromCategory,
+  reorderSubItemsInCategory,
+  setCategoryDropLowest,
+  setCategoryItemsExpanded,
 } from '../../src/domain/operations.js';
 
 describe('Immutable Domain Operations (operations.js)', () => {
@@ -120,5 +129,73 @@ describe('Immutable Domain Operations (operations.js)', () => {
     expect(expandedState.terms[0].courses.every((c) => c.collapsed === false)).toBe(true);
 
     expect(setAllCoursesCollapsed(state, 'missing', true)).toBe(state);
+  });
+
+  it('splits, adds, updates, reorders, drops lowest, duplicates, and merges sub-assessments immutably (#100)', () => {
+    expect(deriveSubItemLabel('Weekly Quizzes', 1)).toBe('Quiz 1');
+    expect(deriveSubItemLabel('Labs', 2)).toBe('Lab 2');
+    expect(deriveSubItemLabel('Assignments', 3)).toBe('Assignment 3');
+    expect(deriveSubItemLabel('Participation', 1)).toBe('Item 1');
+
+    const s0 = createInitialState();
+    const termId = s0.terms[0].id;
+    const courseId = s0.terms[0].courses[0].id;
+    const catId = s0.terms[0].courses[0].categories[0].id; // Quizzes (grade: 90)
+
+    const s1 = splitCategoryIntoSubItems(s0, termId, courseId, catId);
+    const cat1 = s1.terms[0].courses[0].categories[0];
+    expect(cat1.grade).toBeNull();
+    expect(cat1.itemsExpanded).toBe(true);
+    expect(cat1.items).toHaveLength(2);
+    expect(cat1.items[0]).toMatchObject({ name: 'Quiz 1', grade: 90 });
+    expect(cat1.items[1]).toMatchObject({ name: 'Quiz 2', grade: null });
+
+    const s2 = addSubItemToCategory(s1, termId, courseId, catId);
+    const s3 = updateSubItemInCategory(
+      s2,
+      termId,
+      courseId,
+      catId,
+      s2.terms[0].courses[0].categories[0].items[1].id,
+      { grade: 60 },
+    );
+    const s4 = setCategoryDropLowest(s3, termId, courseId, catId, 1);
+    const s5 = reorderSubItemsInCategory(s4, termId, courseId, catId, 0, 2);
+    const s6 = setCategoryItemsExpanded(s5, termId, courseId, catId, false);
+    const cat6 = s6.terms[0].courses[0].categories[0];
+    expect(cat6.dropLowest).toBe(1);
+    expect(cat6.itemsExpanded).toBe(false);
+    expect(cat6.items.map((x) => x.name)).toEqual(['Quiz 2', 'Quiz 3', 'Quiz 1']);
+
+    // Duplicating course copies sub-item structure & dropLowest while clearing sub-item grades
+    const dupState = duplicateCourseInTerm(s6, termId, courseId);
+    const dupCat = dupState.terms[0].courses[1].categories[0];
+    expect(dupCat.dropLowest).toBe(1);
+    expect(dupCat.items.map((x) => [x.name, x.grade])).toEqual([
+      ['Quiz 2', null],
+      ['Quiz 3', null],
+      ['Quiz 1', null],
+    ]);
+
+    // Deleting all sub-items reverts cleanly to single-score category
+    let cur = s6;
+    for (const sub of cat6.items) {
+      cur = deleteSubItemFromCategory(cur, termId, courseId, catId, sub.id);
+    }
+    expect(cur.terms[0].courses[0].categories[0]).toEqual({
+      id: catId,
+      name: 'Quizzes',
+      weight: 10,
+      grade: null,
+    });
+
+    // Merging back to single score preserves computed grade
+    const merged = collapseCategoryToSingleScore(s4, termId, courseId, catId, 90);
+    expect(merged.terms[0].courses[0].categories[0]).toEqual({
+      id: catId,
+      name: 'Quizzes',
+      weight: 10,
+      grade: 90,
+    });
   });
 });

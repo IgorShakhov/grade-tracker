@@ -1,5 +1,10 @@
 import { useState } from 'react';
-import { formatGpa, formatPercent, formatLastUpdated } from '../domain/calculations.js';
+import {
+  formatGpa,
+  formatPercent,
+  formatLastUpdated,
+  roundHalfUp,
+} from '../domain/calculations.js';
 import { useDraftText } from './useDraftText.js';
 import GpaVisualsPanel from './GpaVisualsPanel.jsx';
 
@@ -217,9 +222,12 @@ export default function HeaderLedger({
             <span className="metric-label">Enrolled Credits</span>
             <div className="metric-value-row">
               <span id="enrolled-units-value" className="metric-value">
-                {overall.totalUnitsEnrolled.toFixed(
-                  Number.isInteger(overall.totalUnitsEnrolled) ? 1 : 2,
-                )}
+                {(() => {
+                  const roundedUnits = roundHalfUp(overall.totalUnitsEnrolled, 2);
+                  return Number.isInteger(roundedUnits)
+                    ? roundedUnits.toFixed(1)
+                    : String(roundedUnits);
+                })()}
               </span>
               <span className="metric-sub">units total</span>
             </div>

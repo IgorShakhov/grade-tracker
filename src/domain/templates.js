@@ -17,6 +17,30 @@ function cloneGradeScale() {
   return DEFAULT_GRADE_SCALE.map((band) => ({ ...band }));
 }
 
+export function createNewSubItem(index = 1, nameOverride = null, grade = null) {
+  const itemNum =
+    typeof index === 'number' && Number.isFinite(index) && index >= 1
+      ? Math.floor(index)
+      : 1;
+  const cleanName =
+    typeof nameOverride === 'string' && nameOverride.trim() !== ''
+      ? nameOverride
+      : `Item ${itemNum}`;
+  const cleanGrade =
+    typeof grade === 'number' &&
+    Number.isFinite(grade) &&
+    grade >= 0 &&
+    grade <= 1000
+      ? (grade === 0 ? 0 : grade)
+      : null;
+
+  return {
+    id: generateId('sub'),
+    name: cleanName,
+    grade: cleanGrade,
+  };
+}
+
 export function createNewCategory() {
   return {
     id: generateId('cat'),
@@ -70,14 +94,38 @@ export function duplicateCourseStructure(sourceCourse) {
     targetPct: typeof sourceCourse?.targetPct === 'number' && Number.isFinite(sourceCourse.targetPct)
       ? sourceCourse.targetPct
       : 85,
-    categories: sourceCategories.map((cat) => ({
-      id: generateId('cat'),
-      name: typeof cat?.name === 'string' ? cat.name : 'Assessment',
-      weight: typeof cat?.weight === 'number' && Number.isFinite(cat.weight) && cat.weight >= 0
-        ? cat.weight
-        : 0,
-      grade: null,
-    })),
+    categories: sourceCategories.map((cat) => {
+      const baseCat = {
+        id: generateId('cat'),
+        name: typeof cat?.name === 'string' ? cat.name : 'Assessment',
+        weight: typeof cat?.weight === 'number' && Number.isFinite(cat.weight) && cat.weight >= 0
+          ? cat.weight
+          : 0,
+        grade: null,
+      };
+      if (Array.isArray(cat?.items) && cat.items.length > 0) {
+        const dropLowest =
+          typeof cat.dropLowest === 'number' &&
+          Number.isInteger(cat.dropLowest) &&
+          cat.dropLowest >= 0 &&
+          cat.dropLowest <= 100
+            ? cat.dropLowest
+            : 0;
+        return {
+          ...baseCat,
+          items: cat.items.map((sub, idx) =>
+            createNewSubItem(
+              idx + 1,
+              typeof sub?.name === 'string' ? sub.name : null,
+              null,
+            ),
+          ),
+          dropLowest,
+          itemsExpanded: false,
+        };
+      }
+      return baseCat;
+    }),
   };
 }
 
@@ -99,7 +147,7 @@ export function createNewTerm(existingTermsCount = 1) {
 export function createInitialState() {
   const termId = 'term-fall-1';
   return {
-    version: 1,
+    version: 2,
     studentName: 'My',
     lastUpdated: new Date().toISOString(),
     activeTermId: termId,
@@ -165,7 +213,7 @@ export function createInitialState() {
 export function createEmptyState() {
   const firstTerm = createNewTerm(0);
   return {
-    version: 1,
+    version: 2,
     studentName: 'My',
     lastUpdated: new Date().toISOString(),
     activeTermId: firstTerm.id,

@@ -322,7 +322,16 @@ export function canonicalTrackerFingerprint(rawState) {
         duration: c.duration,
         passFail: c.passFail,
         targetPct: c.targetPct,
-        categories: c.categories.map((cat) => [cat.name, cat.weight, cat.grade]),
+        categories: c.categories.map((cat) =>
+          Array.isArray(cat.items) && cat.items.length > 0
+            ? [
+                cat.name,
+                cat.weight,
+                cat.dropLowest || 0,
+                cat.items.map((sub) => [sub.name, sub.grade]),
+              ]
+            : [cat.name, cat.weight, cat.grade],
+        ),
       })),
     })),
   });

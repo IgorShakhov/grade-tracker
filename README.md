@@ -13,7 +13,7 @@ If you are an AI coding assistant (Antigravity, Cursor, Claude Code, Copilot, et
 
 ## Key Features
 
-- **Inline Assessment Ledger**: Add, edit, reorder, and weight individual coursework categories and graded items directly inside each course.
+- **Inline Assessment Ledger & Sub-Assessments**: Add, edit, reorder, and weight coursework categories, or split any category (such as Quizzes, Labs, or Homework) into individual sub-assessment items with automatic sub-averaging and an optional **Drop lowest `N`** rule.
 - **Running Weighted Course Grades**: Live calculation of current earned percentage, graded vs. remaining weight, and projected standing.
 - **Unit-Weighted GPA & Multi-Term Tracking**: Organize courses across academic terms with flexible course credit inputs (`0`–`100` credits, quick presets, and credit-system guidance) plus automatic term GPA, cumulative unit-weighted GPA, and Pass/Fail exclusion support.
 - **Term GPA Trend & Grade Distribution Visuals**: Collapsible pure-SVG term-by-term GPA progression chart and letter-grade tier distribution breakdown with live What-If Simulator preview updates.

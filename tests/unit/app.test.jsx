@@ -939,9 +939,9 @@ describe('Grade Tracker React Application (M1 + M1.1 + Firebase Cloud Sync)', ()
     expect(screen.queryByText(/Recovered Saved Courses/i)).not.toBeInTheDocument();
     unmount();
 
-    // Now seed a v2 document in localStorage -> App shows App Update Required and locks inputs read-only without overwriting v2 data!
-    const rawV2 = JSON.stringify({ ...createInitialState(), version: 2 });
-    window.localStorage.setItem('grade_tracker_v1', rawV2);
+    // Now seed a v3 document in localStorage -> App shows App Update Required and locks inputs read-only without overwriting v3 data!
+    const rawV3 = JSON.stringify({ ...createInitialState(), version: 3 });
+    window.localStorage.setItem('grade_tracker_v1', rawV3);
     try {
       render(
         <StrictMode>
@@ -953,7 +953,7 @@ describe('Grade Tracker React Application (M1 + M1.1 + Firebase Cloud Sync)', ()
       // Collapsing a course works cleanly in-memory without touching localStorage
       fireEvent.click(screen.getByRole('button', { name: 'Collapse ECON101' }));
       expect(screen.getByRole('button', { name: 'Expand ECON101' })).toBeInTheDocument();
-      expect(window.localStorage.getItem('grade_tracker_v1')).toBe(rawV2);
+      expect(window.localStorage.getItem('grade_tracker_v1')).toBe(rawV3);
     } finally {
       window.localStorage.clear();
       storageService.load();
@@ -1733,7 +1733,7 @@ describe('Grade Tracker React Application (M1 + M1.1 + Firebase Cloud Sync)', ()
       </StrictMode>,
     );
 
-    const econCredits = screen.getByLabelText('ECON101 credit units');
+    const econCredits = screen.getByLabelText('ECON101 credits');
     expect(econCredits).toHaveValue('0.5');
 
     // 1. Focusing opens quick-pick preset chips; clicking `3.0` updates course credits and enrolled total
@@ -1872,5 +1872,132 @@ describe('Grade Tracker React Application (M1 + M1.1 + Firebase Cloud Sync)', ()
     expect(
       within(panel).getByRole('img', { name: /Term 2 4\.00/i }),
     ).toBeInTheDocument();
+  });
+
+  it('supports splitting categories into sub-assessments, Drop Lowest N badges, Undo/Redo UI preservation, What-If isolation, and passes axe (#100)', async () => {
+    const { axe } = await import('vitest-axe');
+    const axeOpts = { rules: { 'color-contrast': { enabled: false } } };
+
+    const { container } = render(
+      <StrictMode>
+        <App />
+      </StrictMode>,
+    );
+
+    const econSection = screen.getByRole('region', { name: 'Course ECON101' });
+
+    // 1. Split ECON101 Quizzes (initial grade 90%) into sub-items -> Quiz 1 inherits 90%, Quiz 2 starts blank
+    fireEvent.click(
+      within(econSection).getByRole('button', {
+        name: /Split items for Quizzes/i,
+      }),
+    );
+
+    const subGroup = within(econSection).getByRole('group', {
+      name: /ECON101 Quizzes sub-assessments/i,
+    });
+    const quiz1Input = within(subGroup).getByLabelText(
+      /ECON101 Quizzes Quiz 1 grade percent/i,
+    );
+    const quiz2Input = within(subGroup).getByLabelText(
+      /ECON101 Quizzes Quiz 2 grade percent/i,
+    );
+    expect(quiz1Input).toHaveValue('90.00');
+    expect(quiz2Input).toHaveValue('');
+
+    // 2. Enter Quiz 2 = 50% and add Quiz 3 = 100% -> mean without drop is (90+50+100)/3 = 80.00%
+    fireEvent.focus(quiz2Input);
+    fireEvent.change(quiz2Input, { target: { value: '50' } });
+    fireEvent.blur(quiz2Input);
+
+    fireEvent.click(within(subGroup).getByRole('button', { name: /\+ Add Item/i }));
+    const quiz3Input = within(subGroup).getByLabelText(
+      /ECON101 Quizzes Quiz 3 grade percent/i,
+    );
+    fireEvent.focus(quiz3Input);
+    fireEvent.change(quiz3Input, { target: { value: '100' } });
+    fireEvent.blur(quiz3Input);
+
+    expect(
+      within(econSection).getByLabelText('ECON101 Quizzes computed grade'),
+    ).toHaveTextContent('80.00%');
+
+    // 3. Enable Drop lowest 1 -> Quiz 2 (50%) gets `Dropped` badge, Quizzes average jumps to (90+100)/2 = 95.00%
+    const dropGroup = within(subGroup).getByRole('group', {
+      name: /Quizzes drop lowest count/i,
+    });
+    fireEvent.click(within(dropGroup).getByRole('button', { name: '1' }));
+
+    expect(within(subGroup).getByText('Dropped')).toBeInTheDocument();
+    expect(within(econSection).getByText('Drop lowest 1')).toBeInTheDocument();
+    expect(
+      within(econSection).getByLabelText('ECON101 Quizzes computed grade'),
+    ).toHaveTextContent('95.00%');
+
+    // Automated WCAG 2.2 AA accessibility check with expanded sub-items + Dropped badge
+    const axeResults = await axe(container, axeOpts);
+    expect(axeResults.violations).toEqual([]);
+
+    // 4. What-If Simulator: reordering sub-items & changing Quiz 1 inside sandbox tracks diff count and reverts on exit
+    fireEvent.click(screen.getByRole('button', { name: /What-If Simulator/i }));
+    const simSubGroup = within(
+      screen.getByRole('region', { name: 'Course ECON101' }),
+    ).getByRole('group', { name: /ECON101 Quizzes sub-assessments/i });
+    fireEvent.click(
+      within(simSubGroup).getByRole('button', { name: /Move Quiz 1 down/i }),
+    );
+    expect(
+      screen.getByRole('button', { name: /What-If Active \(1\)/i }),
+    ).toBeInTheDocument();
+
+    const simQuiz1 = within(simSubGroup).getByLabelText(
+      /ECON101 Quizzes Quiz 1 grade percent/i,
+    );
+    fireEvent.focus(simQuiz1);
+    fireEvent.change(simQuiz1, { target: { value: '60' } });
+    fireEvent.blur(simQuiz1);
+
+    expect(
+      within(
+        screen.getByRole('region', { name: 'Course ECON101' }),
+      ).getByLabelText('ECON101 Quizzes computed grade'),
+    ).toHaveTextContent('80.00%');
+
+    fireEvent.click(screen.getByRole('button', { name: /Exit Simulator/i }));
+    const liveEcon = screen.getByRole('region', { name: 'Course ECON101' });
+    expect(
+      within(liveEcon).getByLabelText('ECON101 Quizzes computed grade'),
+    ).toHaveTextContent('95.00%');
+
+    // 5. Undo reverts Drop lowest 1 -> set Quiz 1=89, Quiz 2=89, Quiz 3=90 -> full precision 89.33333333333333 preserved on Single score merge!
+    fireEvent.click(screen.getByRole('button', { name: /↶ Undo/i }));
+    const liveSubGroup = within(liveEcon).getByRole('group', {
+      name: /ECON101 Quizzes sub-assessments/i,
+    });
+    for (const [label, val] of [
+      ['Quiz 1', '89'],
+      ['Quiz 2', '89'],
+      ['Quiz 3', '90'],
+    ]) {
+      const inp = within(liveSubGroup).getByLabelText(
+        new RegExp(`ECON101 Quizzes ${label} grade percent`, 'i'),
+      );
+      fireEvent.focus(inp);
+      fireEvent.change(inp, { target: { value: val } });
+      fireEvent.blur(inp);
+    }
+
+    fireEvent.click(
+      within(liveEcon).getByRole('button', {
+        name: /Use single score for Quizzes/i,
+      }),
+    );
+    expect(
+      within(liveEcon).getByLabelText('ECON101 Quizzes grade percent'),
+    ).toHaveValue('89.33');
+    expect(storageService.load().terms[0].courses[0].categories[0].grade).toBeCloseTo(
+      268 / 3,
+      12,
+    );
   });
 });
