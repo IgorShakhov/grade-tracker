@@ -2,7 +2,8 @@ const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 export const DEFAULT_UMAMI_SCRIPT_URL = 'https://cloud.umami.is/script.js';
 export const UMAMI_OPT_OUT_KEY = 'umami.disabled';
-const BEFORE_SEND_GLOBAL = '__gtUmamiBeforeSend';
+const BEFORE_SEND_GLOBAL = '__gtMetricsBeforeSend';
+const SCRIPT_MARKER_ATTR = 'data-gt-m';
 const MAX_PENDING_EVENTS = 20;
 
 /**
@@ -358,13 +359,15 @@ export function initAnalytics(options = {}) {
       return true;
     }
 
-    const existing = win.document.querySelector('script[data-gt-umami="true"]');
+    const existing = win.document.querySelector(
+      `script[${SCRIPT_MARKER_ATTR}="true"]`,
+    );
     if (!existing) {
       const script = win.document.createElement('script');
       script.async = true;
       script.defer = true;
       script.src = config.scriptUrl;
-      script.setAttribute('data-gt-umami', 'true');
+      script.setAttribute(SCRIPT_MARKER_ATTR, 'true');
       script.setAttribute('data-website-id', config.websiteId);
       if (config.hostUrl) {
         script.setAttribute('data-host-url', config.hostUrl);
@@ -452,7 +455,7 @@ export function resetAnalyticsForTests(
   pendingQueue = [];
   if (win?.document) {
     win.document
-      .querySelectorAll('script[data-gt-umami="true"]')
+      .querySelectorAll(`script[${SCRIPT_MARKER_ATTR}="true"]`)
       .forEach((el) => el.remove());
   }
   if (win) {
