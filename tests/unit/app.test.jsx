@@ -1,6 +1,7 @@
 import { StrictMode } from 'react';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { render, screen, within, fireEvent, waitFor, act } from '@testing-library/react';
+import { createInitialState } from '../../src/domain/templates.js';
 import { storageService } from '../../src/services/storage.js';
 import { resetFirebasePreloadForTests } from '../../src/services/cloudSync.js';
 import {
@@ -1781,5 +1782,95 @@ describe('Grade Tracker React Application (M1 + M1.1 + Firebase Cloud Sync)', ()
     expect(
       screen.queryByRole('region', { name: /ECON101 credit system guidance/i }),
     ).not.toBeInTheDocument();
+  });
+
+  it('toggles GPA Trend & Grade Distribution visuals, updates live in What-If Simulator, switches terms via trend chips, and passes axe (#102)', async () => {
+    const { axe } = await import('vitest-axe');
+    const axeOpts = { rules: { 'color-contrast': { enabled: false } } };
+    const multiTermState = createInitialState();
+    const term2 = {
+      id: 'term-2',
+      name: 'Term 2',
+      courses: [
+        {
+          id: 'c-term2-1',
+          code: 'CS202',
+          title: 'Data Structures',
+          units: 1.0,
+          duration: 'term',
+          passFail: false,
+          collapsed: false,
+          targetPct: 85,
+          categories: [
+            { id: 'c202-1', name: 'Midterm', weight: 40, grade: 92 },
+            { id: 'c202-2', name: 'Final Exam', weight: 60, grade: null },
+          ],
+        },
+      ],
+    };
+    multiTermState.terms.push(term2);
+    storageService.save(multiTermState);
+
+    const { container } = render(
+      <StrictMode>
+        <App />
+      </StrictMode>,
+    );
+
+    // Collapsed by default so initial vertical layout stays compact
+    const toggleBtn = screen.getByRole('button', { name: /Show GPA Visuals/i });
+    expect(toggleBtn).toHaveAttribute('aria-expanded', 'false');
+    expect(
+      screen.queryByRole('region', {
+        name: /GPA Trend and Grade Distribution Visuals/i,
+      }),
+    ).not.toBeInTheDocument();
+
+    // Expand GPA Visuals panel
+    fireEvent.click(toggleBtn);
+    expect(toggleBtn).toHaveAttribute('aria-expanded', 'true');
+    const panel = screen.getByRole('region', {
+      name: /GPA Trend and Grade Distribution Visuals/i,
+    });
+    expect(
+      within(panel).getByRole('img', {
+        name: /Term GPA progression across 2 terms/i,
+      }),
+    ).toBeInTheDocument();
+    expect(within(panel).getByText(/Grade Distribution/i)).toBeInTheDocument();
+
+    // Clicking Term 2 chip inside the trend footer selects Term 2 tab
+    const termChipsGroup = within(panel).getByRole('group', {
+      name: /Inspect term GPA details/i,
+    });
+    fireEvent.click(within(termChipsGroup).getByRole('button', { name: /Term 2/i }));
+    expect(screen.getByRole('region', { name: 'Course CS202' })).toBeInTheDocument();
+
+    // Entering What-If Simulator and changing CS202 Midterm to 51% updates visuals live without mutating storage
+    fireEvent.click(screen.getByRole('button', { name: /What-If Simulator/i }));
+    expect(within(panel).getByText(/What-If Live/i)).toBeInTheDocument();
+
+    const cs202Section = screen.getByRole('region', { name: 'Course CS202' });
+    const midtermInput = within(cs202Section).getByLabelText(
+      /CS202 Midterm grade percent/i,
+    );
+    fireEvent.focus(midtermInput);
+    fireEvent.change(midtermInput, { target: { value: '51' } });
+    fireEvent.blur(midtermInput);
+
+    // Term 2 drops from 4.00 (A+) to 0.70 (D-) in the live trend SVG aria summary
+    expect(
+      within(panel).getByRole('img', { name: /Term 2 0\.70/i }),
+    ).toBeInTheDocument();
+
+    // Automated WCAG 2.2 AA accessibility check with expanded SVG chart + distribution bars + What-If banner
+    const axeResults = await axe(container, axeOpts);
+    expect(axeResults.violations).toEqual([]);
+
+    // Exiting What-If restores Term 2 to 4.00 immediately
+    fireEvent.click(screen.getByRole('button', { name: /Exit Simulator/i }));
+    expect(
+      within(panel).getByRole('img', { name: /Term 2 4\.00/i }),
+    ).toBeInTheDocument();
   });
 });

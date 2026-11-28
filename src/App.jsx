@@ -1472,6 +1472,7 @@ export default function App() {
         simCount={simCount}
         stats={stats}
         hasMultipleTerms={activeState.terms.length > 1}
+        activeTermId={activeTerm?.id}
         activeTermName={activeTerm?.name || 'Term'}
         canUndo={!readOnly && !simMode && doc.past.length > 0}
         canRedo={!readOnly && !simMode && doc.future.length > 0}
@@ -1485,6 +1486,7 @@ export default function App() {
             { coalesceKey: 'owner-name' },
           );
         }}
+        onSelectTerm={handleSelectTerm}
         onToggleSimMode={handleToggleSimMode}
         onOpenSync={handleOpenSyncControl}
         onOpenShare={handleOpenShareModal}

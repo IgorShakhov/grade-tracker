@@ -890,8 +890,201 @@ export function calculateAggregateStats(courses, simGrades = null, gradeScale = 
   };
 }
 
+const CANONICAL_SCALE_TIERS = new Set([
+  'tier-a',
+  'tier-b',
+  'tier-c',
+  'tier-d',
+  'tier-f',
+]);
+
 /**
- * Compute overall cumulative stats and active term stats across the entire tracker state.
+ * Compute term-by-term GPA progression (both Term GPA and running Cumulative GPA)
+ * and graded course tier distribution across the active grading scale (#102).
+ */
+export function calculateGpaVisuals(state, simGrades = null) {
+  const gradeScale = Array.isArray(state?.gradeScale) && state.gradeScale.length > 0
+    ? state.gradeScale
+    : DEFAULT_GRADE_SCALE;
+  const terms = Array.isArray(state?.terms) ? state.terms : [];
+
+  let scaleMaxGpa = 0;
+  const tierGroups = new Map();
+
+  for (const band of gradeScale) {
+    const bandGpa = typeof band?.gpa === 'number' && Number.isFinite(band.gpa) ? band.gpa : 0;
+    if (bandGpa > scaleMaxGpa) {
+      scaleMaxGpa = bandGpa;
+    }
+    const rawTier = typeof band?.tier === 'string' ? band.tier.trim() : '';
+    const tierKey = CANONICAL_SCALE_TIERS.has(rawTier) ? rawTier : deriveTierFromGpa(bandGpa);
+    if (!tierGroups.has(tierKey)) {
+      tierGroups.set(tierKey, {
+        key: tierKey,
+        tier: tierKey,
+        letters: [],
+        count: 0,
+        units: 0,
+        letterCounts: {},
+      });
+    }
+    const letter = typeof band?.letter === 'string' && band.letter.trim() !== ''
+      ? band.letter.trim()
+      : '—';
+    const group = tierGroups.get(tierKey);
+    if (!group.letters.includes(letter)) {
+      group.letters.push(letter);
+    }
+  }
+
+  if (scaleMaxGpa <= 0) {
+    scaleMaxGpa = 4.0;
+  }
+
+  const termSeries = [];
+  const runningCourses = [];
+  let prevGradedTermGpa = null;
+  let gradedTermCount = 0;
+
+  for (let idx = 0; idx < terms.length; idx += 1) {
+    const term = terms[idx];
+    const courses = Array.isArray(term?.courses) ? term.courses : [];
+    runningCourses.push(...courses);
+
+    const termAgg = calculateAggregateStats(courses, simGrades, gradeScale);
+    const runningAgg = calculateAggregateStats(runningCourses, simGrades, gradeScale);
+    const termGpa = termAgg.cumulativeGpa;
+    const deltaFromPrev = prevGradedTermGpa !== null && termGpa !== null
+      ? termGpa - prevGradedTermGpa
+      : null;
+
+    if (termGpa !== null) {
+      prevGradedTermGpa = termGpa;
+      gradedTermCount += 1;
+    }
+
+    termSeries.push({
+      termId: typeof term?.id === 'string' && term.id !== '' ? term.id : `term-${idx + 1}`,
+      termName: typeof term?.name === 'string' && term.name.trim() !== ''
+        ? term.name.trim()
+        : `Term ${idx + 1}`,
+      termGpa,
+      runningCumulativeGpa: runningAgg.cumulativeGpa,
+      weightedAverage: termAgg.weightedAverage,
+      enrolledUnits: termAgg.totalUnitsEnrolled,
+      gpaUnits: termAgg.gpaUnits,
+      deltaFromPrev,
+    });
+  }
+
+  const passBucket = {
+    key: 'pass',
+    tier: 'tier-cr',
+    letters: ['P'],
+    count: 0,
+    units: 0,
+    letterCounts: {},
+  };
+  const noPassBucket = {
+    key: 'no-pass',
+    tier: 'tier-f',
+    letters: ['NP'],
+    count: 0,
+    units: 0,
+    letterCounts: {},
+  };
+
+  let gradedCourseCount = 0;
+  let ungradedCourseCount = 0;
+  let gradedUnits = 0;
+
+  for (const course of runningCourses) {
+    const units = typeof course?.units === 'number' && Number.isFinite(course.units) && course.units > 0
+      ? course.units
+      : 0;
+    const cStats = calculateCourseStats(course, simGrades, gradeScale);
+    if (cStats.overallGrade === null || !Number.isFinite(cStats.overallGrade)) {
+      ungradedCourseCount += 1;
+      continue;
+    }
+
+    gradedCourseCount += 1;
+    gradedUnits += units;
+
+    const isPassFail = Boolean(course?.passFail ?? course?.creditNoCredit);
+    if (isPassFail) {
+      const targetBucket = cStats.letter === 'P' ? passBucket : noPassBucket;
+      targetBucket.count += 1;
+      targetBucket.units += units;
+      targetBucket.letterCounts[cStats.letter] = (targetBucket.letterCounts[cStats.letter] || 0) + 1;
+      continue;
+    }
+
+    const bucketKey = tierGroups.has(cStats.tier) ? cStats.tier : 'tier-f';
+    if (!tierGroups.has(bucketKey)) {
+      tierGroups.set(bucketKey, {
+        key: bucketKey,
+        tier: bucketKey,
+        letters: [cStats.letter || 'F'],
+        count: 0,
+        units: 0,
+        letterCounts: {},
+      });
+    }
+    const bucket = tierGroups.get(bucketKey);
+    bucket.count += 1;
+    bucket.units += units;
+    const ltr = cStats.letter || '—';
+    bucket.letterCounts[ltr] = (bucket.letterCounts[ltr] || 0) + 1;
+  }
+
+  const rawBuckets = [...tierGroups.values()];
+  if (passBucket.count > 0) rawBuckets.push(passBucket);
+  if (noPassBucket.count > 0) rawBuckets.push(noPassBucket);
+
+  const distribution = rawBuckets.map((b) => {
+    let label;
+    if (b.key === 'pass') {
+      label = 'P (Pass)';
+    } else if (b.key === 'no-pass') {
+      label = 'NP (No Pass)';
+    } else if (b.letters.length <= 3) {
+      label = b.letters.join(' / ');
+    } else {
+      label = `${b.letters[0]}–${b.letters[b.letters.length - 1]}`;
+    }
+
+    const sharePct = gradedCourseCount > 0 ? (b.count / gradedCourseCount) * 100 : 0;
+    const roundedPct = gradedCourseCount > 0 ? roundHalfUp(sharePct, 0) : 0;
+    const detailLabel = Object.entries(b.letterCounts)
+      .map(([ltr, n]) => `${n} ${ltr}`)
+      .join(', ');
+
+    return {
+      key: b.key,
+      tier: b.tier,
+      label,
+      count: b.count,
+      units: clampFinite(b.units, 0),
+      sharePct: clampFinite(sharePct, 0),
+      roundedPct,
+      detailLabel,
+    };
+  });
+
+  return {
+    scaleMaxGpa,
+    termSeries,
+    gradedTermCount,
+    gradedCourseCount,
+    ungradedCourseCount,
+    gradedUnits: clampFinite(gradedUnits, 0),
+    distribution,
+  };
+}
+
+/**
+ * Compute overall cumulative stats, active term stats, and GPA visuals across the entire tracker state.
  */
 export function calculateAllStats(state, simGrades = null) {
   const gradeScale = Array.isArray(state?.gradeScale) && state.gradeScale.length > 0
@@ -906,8 +1099,11 @@ export function calculateAllStats(state, simGrades = null) {
     ? calculateAggregateStats(activeTerm.courses || [], simGrades, gradeScale)
     : calculateAggregateStats([], simGrades, gradeScale);
 
+  const visuals = calculateGpaVisuals(state, simGrades);
+
   return {
     overall,
     termStats,
+    visuals,
   };
 }

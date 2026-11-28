@@ -30,7 +30,7 @@ Read this file and [`docs/ROADMAP.md`](docs/ROADMAP.md) first before modifying t
 │   ├── domain/
 │   │   ├── constants.js              # STORAGE_KEY, DEFAULT_GRADE_SCALE, UNIT_OPTIONS, TARGET_PRESETS
 │   │   ├── templates.js              # createInitialState, createEmptyState, course/term factories
-│   │   ├── calculations.js           # Pure math: roundHalfUp, lookupGrade, course/term/cumulative GPA, target calculator
+│   │   ├── calculations.js           # Pure math: roundHalfUp, lookupGrade, course/term/cumulative GPA, target & GPA visuals
 │   │   └── operations.js             # Pure immutable helpers: reorder, moveCourseToTerm, duplicateCourseInTerm, collapseAll
 │   ├── services/
 │   │   ├── storage.js                # validateTrackerState, schema gating, corrupt-load salvage, StorageService
@@ -39,7 +39,8 @@ Read this file and [`docs/ROADMAP.md`](docs/ROADMAP.md) first before modifying t
 │   │   ├── share.js                  # CompressionStream ('z1.') / base64url ('u1.') point-in-time URL snapshot codec
 │   │   └── analytics.js              # Optional cookie-free Umami analytics: enum allowlist, URL/referrer token stripping, ?analytics=off
 │   ├── components/
-│   │   ├── HeaderLedger.jsx          # Owner input, Sync status pill, Undo/Redo, What-If, Sign In / Account, Share
+│   │   ├── HeaderLedger.jsx          # Owner input, Sync status pill, Undo/Redo, What-If, Sign In / Account, Share, GPA Visuals toggle
+│   │   ├── GpaVisualsPanel.jsx       # Collapsible pure-SVG Term GPA Trend chart & letter-grade tier distribution bars
 │   │   ├── TermTabs.jsx              # ARIA tablist (ArrowLeft/Right/Home/End + F2 rename), delete trigger, Collapse/Expand All
 │   │   ├── CourseCard.jsx            # Collapsible course sheet (⋮⋮ drag handle), inline numeric cells, 2-click row delete, target bar
 │   │   ├── GradeScaleCard.jsx        # Sticky Grading Scale reference + Customize trigger
