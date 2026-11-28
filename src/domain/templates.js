@@ -61,8 +61,8 @@ export function duplicateCourseStructure(sourceCourse) {
     id: generateId('course'),
     code: `${baseCode}-COPY`,
     title: typeof sourceCourse?.title === 'string' ? sourceCourse.title : 'Course Title',
-    units: typeof sourceCourse?.units === 'number' && Number.isFinite(sourceCourse.units) && sourceCourse.units > 0
-      ? sourceCourse.units
+    units: typeof sourceCourse?.units === 'number' && Number.isFinite(sourceCourse.units) && sourceCourse.units >= 0 && sourceCourse.units <= 100
+      ? (sourceCourse.units === 0 ? 0 : sourceCourse.units)
       : 0.5,
     duration: sourceCourse?.duration === 'full-year' ? 'full-year' : 'term',
     passFail: Boolean(sourceCourse?.passFail ?? sourceCourse?.creditNoCredit),

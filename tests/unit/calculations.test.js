@@ -140,7 +140,7 @@ function createBenchmarkState() {
 describe('Domain Constants (constants.js)', () => {
   it('exports exact STORAGE_KEY, UNIT_OPTIONS, and DURATION_OPTIONS', () => {
     expect(STORAGE_KEY).toBe('grade_tracker_v1');
-    expect(UNIT_OPTIONS).toEqual([0.25, 0.5, 1.0, 1.5, 2.0]);
+    expect(UNIT_OPTIONS).toEqual([0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0]);
     expect(DURATION_OPTIONS).toEqual([
       { value: 'term', label: 'Single Term' },
       { value: 'full-year', label: 'Full Year' },

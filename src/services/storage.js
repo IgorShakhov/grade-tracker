@@ -237,11 +237,11 @@ function normalizeCourseHeaderFields(course, tIdx, cIdx, termName, usedCourseIds
   if (
     typeof course.units !== 'number' ||
     !Number.isFinite(course.units) ||
-    course.units <= 0 ||
+    course.units < 0 ||
     course.units > 100
   ) {
     throw new Error(
-      `Invalid tracker state: course "${course.code}" must have a finite numeric "units" greater than 0 and at most 100.`,
+      `Invalid tracker state: course "${course.code}" must have a finite numeric "units" between 0 and 100.`,
     );
   }
   const normalizedUnits = course.units === 0 ? 0 : course.units;

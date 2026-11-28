@@ -1154,9 +1154,11 @@ export default function App() {
       return;
     }
 
-    const isTextPatch = keys.every((k) => k === 'code' || k === 'title');
+    const isCoalescablePatch = keys.every(
+      (k) => k === 'code' || k === 'title' || k === 'units',
+    );
     commitState(applyCoursePatch, {
-      coalesceKey: isTextPatch ? `course-${courseId}-${keys[0]}` : null,
+      coalesceKey: isCoalescablePatch ? `course-${courseId}-${keys[0]}` : null,
     });
   }
 
