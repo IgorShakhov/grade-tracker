@@ -294,7 +294,7 @@ describe('Privacy-First Umami Analytics Service (#104)', () => {
       }),
     ).toBe(true);
 
-    const script = document.querySelector('script[data-gt-umami="true"]');
+    const script = document.querySelector('script[data-gt-m="true"]');
     expect(script).not.toBeNull();
     expect(script.getAttribute('src')).toBe(DEFAULT_UMAMI_SCRIPT_URL);
     expect(script.getAttribute('data-website-id')).toBe(VALID_WEBSITE_ID);
@@ -302,8 +302,8 @@ describe('Privacy-First Umami Analytics Service (#104)', () => {
     expect(window.umamiConfig.hostUrl).toBeUndefined();
     expect(script.getAttribute('data-exclude-search')).toBe('true');
     expect(script.getAttribute('data-exclude-hash')).toBe('true');
-    expect(script.getAttribute('data-before-send')).toBe('__gtUmamiBeforeSend');
-    expect(typeof window.__gtUmamiBeforeSend).toBe('function');
+    expect(script.getAttribute('data-before-send')).toBe('__gtMetricsBeforeSend');
+    expect(typeof window.__gtMetricsBeforeSend).toBe('function');
 
     // Emit events before script finishes loading -> queued in memory, deduplicated, capped at 20
     expect(
@@ -364,15 +364,15 @@ describe('Privacy-First Umami Analytics Service (#104)', () => {
       envObj: {
         MODE: 'production',
         VITE_UMAMI_WEBSITE_ID: VALID_WEBSITE_ID,
-        VITE_UMAMI_SCRIPT_URL: 'https://stats.example.org/script.js',
+        VITE_UMAMI_SCRIPT_URL: 'https://edge.example.org/app.js',
       },
       win: window,
       allowLocalhost: true,
       allowTestMode: true,
     });
-    const customScript = document.querySelector('script[data-gt-umami="true"]');
+    const customScript = document.querySelector('script[data-gt-m="true"]');
     expect(customScript.getAttribute('data-host-url')).toBe(
-      'https://stats.example.org',
+      'https://edge.example.org',
     );
     expect(trackEvent('term_added', undefined, window)).toBe(true);
     customScript.dispatchEvent(new Event('load')); // window.umami still undefined (empty surrogate)
@@ -386,8 +386,104 @@ describe('Privacy-First Umami Analytics Service (#104)', () => {
       allowLocalhost: true,
       allowTestMode: true,
     });
-    const blockedScript = document.querySelector('script[data-gt-umami="true"]');
+    const blockedScript = document.querySelector('script[data-gt-m="true"]');
     blockedScript.dispatchEvent(new Event('error'));
     expect(trackEvent('term_added', undefined, window)).toBe(false);
+  });
+
+  it('resolves custom Vite CSP origin and relays /app.js + /e cleanly in umami-proxy-worker.mjs', async () => {
+    const { resolveCustomUmamiCspOrigin } = await import('../../vite.config.js');
+    const workerMod = await import('../../scripts/umami-proxy-worker.mjs');
+    const worker = workerMod.default;
+
+    expect(resolveCustomUmamiCspOrigin('')).toBe('');
+    expect(resolveCustomUmamiCspOrigin('https://cloud.umami.is/script.js')).toBe(
+      '',
+    );
+    expect(resolveCustomUmamiCspOrigin('http://edge.example.org/app.js')).toBe(
+      '',
+    );
+    expect(
+      resolveCustomUmamiCspOrigin('https://gt-edge.example.workers.dev/app.js'),
+    ).toBe('https://gt-edge.example.workers.dev');
+
+    const upstreamCalls = [];
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = async (url, init) => {
+      upstreamCalls.push({ url, init });
+      if (url === 'https://cloud.umami.is/script.js') {
+        return new Response(
+          'const ep="/api/send";const h={"x-umami-website-id":id,"x-umami-cache":c};',
+          { status: 200 },
+        );
+      }
+      return new Response(JSON.stringify({ cache: 'tok-1' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    };
+
+    try {
+      // 1. GET /app.js rewrites /api/send -> /e and x-umami-* -> x-gt-*
+      const scriptResp = await worker.fetch(
+        new Request('https://gt-edge.example.workers.dev/app.js'),
+        {},
+      );
+      const jsBody = await scriptResp.text();
+      expect(scriptResp.status).toBe(200);
+      expect(jsBody).toContain('"/e"');
+      expect(jsBody).not.toContain('/api/send');
+      expect(jsBody).toContain('"x-gt-website-id"');
+      expect(jsBody).not.toContain('x-umami-');
+
+      // 2. POST /e enforces ALLOWED_ORIGIN, adds cookieless daily salt, and maps x-gt-* back to x-umami-*
+      const blockedResp = await worker.fetch(
+        new Request('https://gt-edge.example.workers.dev/e', {
+          method: 'POST',
+          headers: { Origin: 'https://evil.example.com' },
+          body: '{}',
+        }),
+        { ALLOWED_ORIGIN: 'https://allowed.example.io' },
+      );
+      expect(blockedResp.status).toBe(403);
+
+      const okResp = await worker.fetch(
+        new Request('https://gt-edge.example.workers.dev/e', {
+          method: 'POST',
+          headers: {
+            Origin: 'https://allowed.example.io',
+            'Content-Type': 'application/json',
+            'cf-connecting-ip': '203.0.113.42',
+            'user-agent': 'Mozilla/5.0 TestBrowser',
+            'x-gt-website-id': VALID_WEBSITE_ID,
+            'x-gt-hostname': 'allowed.example.io',
+            'x-gt-cache': 'cached-jwt',
+          },
+          body: JSON.stringify({
+            type: 'event',
+            payload: { website: VALID_WEBSITE_ID, url: '/grade-tracker/' },
+          }),
+        }),
+        { ALLOWED_ORIGIN: 'https://allowed.example.io' },
+      );
+      expect(okResp.status).toBe(200);
+      expect(okResp.headers.get('Access-Control-Allow-Origin')).toBe(
+        'https://allowed.example.io',
+      );
+
+      const collectCall = upstreamCalls[1];
+      expect(collectCall.url).toBe('https://gateway.umami.is/api/send');
+      expect(collectCall.init.headers.get('x-umami-website-id')).toBe(
+        VALID_WEBSITE_ID,
+      );
+      expect(collectCall.init.headers.get('x-umami-cache')).toBe('cached-jwt');
+      expect(collectCall.init.headers.get('X-Forwarded-For')).toBe(
+        '203.0.113.42',
+      );
+      const forwardedBody = JSON.parse(collectCall.init.body);
+      expect(forwardedBody.payload.salt).toMatch(/^[0-9a-f]{16}$/);
+    } finally {
+      globalThis.fetch = origFetch;
+    }
   });
 });
