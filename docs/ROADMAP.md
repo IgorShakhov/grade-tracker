@@ -56,10 +56,10 @@ This document tracks shipped milestones, upcoming features, and key technical de
 ### Milestone 3 — Sub-Assessments ("Drop Lowest N"), Visual Analytics & Mobile PWA *(In Progress)*
 - **Flexible Course Credit Weight Input & Guidance (`#101` — Shipped)**:
   - Replaced fixed-preset `<select>` with a free-form `0`–`100` decimal `Credits` input (`0` for non-credit seminars, `0.25`–`1.0` course-equivalents, `1`–`6+` credit hours, `5`–`30` ECTS), quick-pick preset chips (`0.5`–`5.0`), and an accessible `?` credit-weighting guidance popover.
+- **GPA Trend & Grade Distribution Visuals (`#102` — Shipped)**:
+  - Collapsible header visuals panel (`GpaVisualsPanel.jsx`) featuring a pure-SVG Term GPA & Cumulative GPA progression chart (with live What-If Simulator updates and keyboard-accessible term chips) and a letter-grade tier distribution histogram.
 - **Expandable Sub-Category Items**:
   - Expand any category row (e.g., `Quizzes — 10%` or `Homework — 6%`) into individual items (`Quiz 1`, `Quiz 2`, ...) with automatic sub-average calculation and an optional **"Drop lowest `N`"** rule.
-- **GPA & Credit Visuals**:
-  - Compact term-by-term GPA trend visualization and grade distribution summary.
 - **Installable PWA**:
   - Web App Manifest + lightweight asset service worker so the app installs cleanly to iOS/Android home screens and loads even with zero network connectivity.
 

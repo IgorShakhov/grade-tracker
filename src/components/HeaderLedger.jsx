@@ -1,5 +1,7 @@
+import { useState } from 'react';
 import { formatGpa, formatPercent, formatLastUpdated } from '../domain/calculations.js';
 import { useDraftText } from './useDraftText.js';
+import GpaVisualsPanel from './GpaVisualsPanel.jsx';
 
 function getSyncLabel(readOnlyMode, syncSnapshot) {
   if (readOnlyMode === 'live-share') {
@@ -38,17 +40,20 @@ export default function HeaderLedger({
   simCount,
   stats,
   hasMultipleTerms,
+  activeTermId,
   activeTermName,
   canUndo,
   canRedo,
   onUndo,
   onRedo,
   onChangeName,
+  onSelectTerm,
   onToggleSimMode,
   onOpenSync,
   onOpenShare,
 }) {
-  const { overall, termStats } = stats;
+  const [visualsOpen, setVisualsOpen] = useState(false);
+  const { overall, termStats, visuals } = stats;
   const ownerDraft = useDraftText(studentName || 'My', {
     onCommit: onChangeName,
     fallbackOnEmpty: 'My',
@@ -230,6 +235,29 @@ export default function HeaderLedger({
             </div>
           </div>
         </div>
+
+        <div className="visuals-toggle-row">
+          <button
+            id="toggle-gpa-visuals-btn"
+            type="button"
+            className={`visuals-toggle-btn ${visualsOpen ? 'active' : ''}`}
+            aria-expanded={visualsOpen}
+            aria-controls={visualsOpen ? 'gpa-visuals-panel' : undefined}
+            onClick={() => setVisualsOpen((prev) => !prev)}
+          >
+            <span aria-hidden="true">{visualsOpen ? '▾' : '▸'}</span>
+            <span>{visualsOpen ? 'Hide GPA Visuals' : 'Show GPA Visuals'}</span>
+          </button>
+        </div>
+
+        {visualsOpen && (
+          <GpaVisualsPanel
+            visuals={visuals}
+            activeTermId={activeTermId}
+            simMode={simMode}
+            onSelectTerm={onSelectTerm}
+          />
+        )}
       </div>
     </header>
   );

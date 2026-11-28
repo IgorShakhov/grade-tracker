@@ -23,6 +23,7 @@ import {
   calculateTargetRequirement,
   calculateCourseStats,
   calculateAggregateStats,
+  calculateGpaVisuals,
   calculateAllStats,
 } from '../../src/domain/calculations.js';
 
@@ -1426,5 +1427,118 @@ describe('Mixed-Scale, Subnormal & Cancellation Invariants', () => {
     }
 
     expect(verifiedPairs).toBe(weights.length * 6 * weights.length * grades.length * targets.length);
+  });
+});
+
+describe('Term GPA Trend & Grade Distribution Visuals (#102)', () => {
+  it('computes multi-term GPA progression, running cumulative GPA, deltas across ungraded gaps, and tier/Pass-Fail distribution', () => {
+    const state = {
+      gradeScale: DEFAULT_GRADE_SCALE,
+      activeTermId: 't3',
+      terms: [
+        {
+          id: 't1',
+          name: 'Fall Y1',
+          courses: [
+            {
+              id: 'c1',
+              code: 'CS101',
+              units: 3,
+              passFail: false,
+              categories: [{ id: 'k1', name: 'Exam', weight: 100, grade: 86 }], // A -> 4.0
+            },
+            {
+              id: 'c2',
+              code: 'HIST101',
+              units: 3,
+              passFail: false,
+              categories: [{ id: 'k2', name: 'Essay', weight: 100, grade: 74 }], // B -> 3.0
+            },
+          ],
+        },
+        {
+          id: 't2',
+          name: 'Summer Blank',
+          courses: [
+            {
+              id: 'c3',
+              code: 'PLAN200',
+              units: 3,
+              passFail: false,
+              categories: [{ id: 'k3', name: 'Final', weight: 100, grade: null }],
+            },
+          ],
+        },
+        {
+          id: 't3',
+          name: 'Fall Y2',
+          courses: [
+            {
+              id: 'c4',
+              code: 'CS201',
+              units: 4,
+              passFail: false,
+              categories: [{ id: 'k4', name: 'Project', weight: 100, grade: 92 }], // A+ -> 4.0
+            },
+            {
+              id: 'c5',
+              code: 'SEM100',
+              units: 1,
+              passFail: true,
+              categories: [{ id: 'k5', name: 'Attendance', weight: 100, grade: 80 }], // P
+            },
+          ],
+        },
+      ],
+    };
+
+    const visuals = calculateGpaVisuals(state);
+    expect(visuals.scaleMaxGpa).toBe(4.0);
+    expect(visuals.gradedTermCount).toBe(2);
+    expect(visuals.gradedCourseCount).toBe(4);
+    expect(visuals.ungradedCourseCount).toBe(1);
+    expect(visuals.gradedUnits).toBe(11);
+
+    // Term 1: (3*4.0 + 3*3.0) / 6 = 3.50
+    expect(visuals.termSeries[0]).toMatchObject({
+      termId: 't1',
+      termName: 'Fall Y1',
+      termGpa: 3.5,
+      runningCumulativeGpa: 3.5,
+      deltaFromPrev: null,
+    });
+    // Term 2 (ungraded): termGpa null, runningCumulativeGpa stays 3.50
+    expect(visuals.termSeries[1]).toMatchObject({
+      termId: 't2',
+      termGpa: null,
+      runningCumulativeGpa: 3.5,
+      deltaFromPrev: null,
+    });
+    // Term 3: 4.00 term GPA (+0.50 delta vs Fall Y1); cumulative (21 + 16) / 10 = 3.70
+    expect(visuals.termSeries[2].termGpa).toBeCloseTo(4.0, 5);
+    expect(visuals.termSeries[2].deltaFromPrev).toBeCloseTo(0.5, 5);
+    expect(visuals.termSeries[2].runningCumulativeGpa).toBeCloseTo(3.7, 5);
+
+    const tierA = visuals.distribution.find((b) => b.key === 'tier-a');
+    const tierB = visuals.distribution.find((b) => b.key === 'tier-b');
+    const passRow = visuals.distribution.find((b) => b.key === 'pass');
+    expect(tierA).toMatchObject({
+      label: 'A+ / A / A-',
+      count: 2,
+      units: 7,
+      roundedPct: 50,
+    });
+    expect(tierB).toMatchObject({
+      label: 'B+ / B / B-',
+      count: 1,
+      units: 3,
+      roundedPct: 25,
+    });
+    expect(passRow).toMatchObject({
+      label: 'P (Pass)',
+      count: 1,
+      units: 1,
+      roundedPct: 25,
+    });
   });
 });
