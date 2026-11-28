@@ -1722,4 +1722,64 @@ describe('Grade Tracker React Application (M1 + M1.1 + Firebase Cloud Sync)', ()
       });
     }
   });
+
+  it('supports arbitrary credit weights (0, 2.5, 5.0), focus preset chips, and accessible ? credit-system guidance popover (#101)', async () => {
+    const { axe } = await import('vitest-axe');
+    const axeOpts = { rules: { 'color-contrast': { enabled: false } } };
+    const { container } = render(
+      <StrictMode>
+        <App />
+      </StrictMode>,
+    );
+
+    const econCredits = screen.getByLabelText('ECON101 credit units');
+    expect(econCredits).toHaveValue('0.5');
+
+    // 1. Focusing opens quick-pick preset chips; clicking `3.0` updates course credits and enrolled total
+    fireEvent.focus(econCredits);
+    const presetsGroup = screen.getByRole('group', {
+      name: /ECON101 quick credit presets/i,
+    });
+    fireEvent.click(within(presetsGroup).getByRole('button', { name: '3.0' }));
+    expect(econCredits).toHaveValue('3.0');
+    expect(storageService.load().terms[0].courses[0].units).toBe(3);
+
+    // 2. Typing custom fractional credit (`4,5` comma decimal) or `0` non-credit seminar works cleanly; invalid draft reverts on blur
+    fireEvent.focus(econCredits);
+    fireEvent.change(econCredits, { target: { value: '4,5' } });
+    fireEvent.blur(econCredits);
+    expect(econCredits).toHaveValue('4.5');
+    expect(storageService.load().terms[0].courses[0].units).toBe(4.5);
+
+    fireEvent.focus(econCredits);
+    fireEvent.change(econCredits, { target: { value: '999' } }); // > 100 invalid -> reverts to 4.5 on blur
+    fireEvent.blur(econCredits);
+    expect(econCredits).toHaveValue('4.5');
+
+    fireEvent.focus(econCredits);
+    fireEvent.change(econCredits, { target: { value: '0' } }); // 0-credit seminar excluded from GPA denominator
+    fireEvent.blur(econCredits);
+    expect(econCredits).toHaveValue('0');
+    expect(storageService.load().terms[0].courses[0].units).toBe(0);
+
+    // 3. Clicking `?` opens accessible credit-system guidance popover (`0` axe violations) and Escape closes it
+    const helpBtn = screen.getByRole('button', {
+      name: /How ECON101 credits weight GPA/i,
+    });
+    expect(helpBtn).toHaveAttribute('aria-expanded', 'false');
+    fireEvent.click(helpBtn);
+    expect(helpBtn).toHaveAttribute('aria-expanded', 'true');
+    const helpRegion = screen.getByRole('region', {
+      name: /ECON101 credit system guidance/i,
+    });
+    expect(helpRegion).toHaveTextContent(/Course-Units vs\. Credit-Hours/i);
+
+    const axeResults = await axe(container, axeOpts);
+    expect(axeResults.violations).toEqual([]);
+
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(
+      screen.queryByRole('region', { name: /ECON101 credit system guidance/i }),
+    ).not.toBeInTheDocument();
+  });
 });

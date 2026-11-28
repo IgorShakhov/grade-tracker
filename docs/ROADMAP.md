@@ -53,11 +53,11 @@ This document tracks shipped milestones, upcoming features, and key technical de
 
 ## Planned Milestones
 
-### Milestone 3 — Sub-Assessments ("Drop Lowest N"), Visual Analytics & Mobile PWA *(Next Planned)*
+### Milestone 3 — Sub-Assessments ("Drop Lowest N"), Visual Analytics & Mobile PWA *(In Progress)*
+- **Flexible Course Credit Weight Input & Guidance (`#101` — Shipped)**:
+  - Replaced fixed-preset `<select>` with a free-form `0`–`100` decimal `Credits` input (`0` for non-credit seminars, `0.25`–`1.0` course-equivalents, `1`–`6+` credit hours, `5`–`30` ECTS), quick-pick preset chips (`0.5`–`5.0`), and an accessible `?` credit-weighting guidance popover.
 - **Expandable Sub-Category Items**:
   - Expand any category row (e.g., `Quizzes — 10%` or `Homework — 6%`) into individual items (`Quiz 1`, `Quiz 2`, ...) with automatic sub-average calculation and an optional **"Drop lowest `N`"** rule.
-- **Clarified Course Credit Weight Input**:
-  - Support arbitrary credit systems seamlessly (both `0.5`/`1.0` course-equivalents and `1`–`5` credit hours) with clear tooltips.
 - **GPA & Credit Visuals**:
   - Compact term-by-term GPA trend visualization and grade distribution summary.
 - **Installable PWA**:

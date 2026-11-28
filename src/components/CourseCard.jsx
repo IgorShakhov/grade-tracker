@@ -139,6 +139,208 @@ function NumericCellInput({
   );
 }
 
+function formatUnitsDisplay(value) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return '0.5';
+  if (value === 0) return '0';
+  if (Number.isInteger(value)) return value.toFixed(1);
+  return String(roundHalfUp(value, 2));
+}
+
+function parseUnitsInput(raw) {
+  const normalized = String(raw ?? '').trim().replace(',', '.');
+  if (normalized === '') {
+    return { kind: 'empty', value: null };
+  }
+  if (!STRICT_DECIMAL_RE.test(normalized)) {
+    return { kind: 'invalid', value: null };
+  }
+  const num = Number(normalized);
+  if (!Number.isFinite(num) || num < 0 || num > 100) {
+    return { kind: 'invalid', value: null };
+  }
+  return { kind: 'number', value: num === 0 ? 0 : num };
+}
+
+function CourseCreditsControl({
+  courseId,
+  courseCode,
+  units,
+  disabled,
+  onCommit,
+  onPopoverOpenChange,
+}) {
+  const [focused, setFocused] = useState(false);
+  const [showPresets, setShowPresets] = useState(false);
+  const [showHelp, setShowHelp] = useState(false);
+  const [draft, setDraft] = useState(() => formatUnitsDisplay(units));
+  const dirtyRef = useRef(false);
+  const groupRef = useRef(null);
+  const inputRef = useRef(null);
+
+  const anyOpen = (showPresets && !disabled) || showHelp;
+  useEffect(() => {
+    onPopoverOpenChange?.(anyOpen);
+  }, [anyOpen, onPopoverOpenChange]);
+
+  useEffect(() => {
+    if (!showHelp && !showPresets) return undefined;
+    function handlePointerDown(e) {
+      if (groupRef.current && !groupRef.current.contains(e.target)) {
+        setShowHelp(false);
+        setShowPresets(false);
+      }
+    }
+    function handleKeyDown(e) {
+      if (e.key === 'Escape') {
+        setShowHelp(false);
+        setShowPresets(false);
+      }
+    }
+    document.addEventListener('mousedown', handlePointerDown);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', handlePointerDown);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [showHelp, showPresets]);
+
+  const displayedValue = focused ? draft : formatUnitsDisplay(units);
+  const inputId = `units-input-${courseId}`;
+
+  return (
+    <div ref={groupRef} className="units-control-wrap">
+      <div className="units-box">
+        <label className="units-label" htmlFor={inputId}>
+          Credits
+        </label>
+        <input
+          ref={inputRef}
+          id={inputId}
+          type="text"
+          inputMode="decimal"
+          className="units-input"
+          value={displayedValue}
+          disabled={disabled}
+          aria-label={`${courseCode} credit units`}
+          onFocus={(e) => {
+            const full =
+              typeof units === 'number' && Number.isFinite(units)
+                ? String(units)
+                : '0.5';
+            dirtyRef.current = false;
+            setDraft(full);
+            setFocused(true);
+            setShowHelp(false);
+            if (!disabled) {
+              setShowPresets(true);
+            }
+            e.currentTarget.value = full;
+            e.currentTarget.select();
+          }}
+          onChange={(e) => {
+            const raw = e.target.value;
+            dirtyRef.current = true;
+            setDraft(raw);
+            const parsed = parseUnitsInput(raw);
+            if (parsed.kind === 'number' && !Object.is(parsed.value, units)) {
+              onCommit(parsed.value);
+            }
+          }}
+          onBlur={() => {
+            const wasDirty = dirtyRef.current;
+            dirtyRef.current = false;
+            setFocused(false);
+            setShowPresets(false);
+            if (!wasDirty) return;
+            const parsed = parseUnitsInput(draft);
+            if (parsed.kind === 'number') {
+              if (!Object.is(parsed.value, units)) {
+                onCommit(parsed.value);
+              }
+              setDraft(formatUnitsDisplay(parsed.value));
+            } else {
+              setDraft(formatUnitsDisplay(units));
+            }
+          }}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              e.currentTarget.blur();
+            } else if (e.key === 'Escape') {
+              setShowPresets(false);
+            }
+          }}
+        />
+        <button
+          type="button"
+          className={`units-help-btn ${showHelp ? 'active' : ''}`}
+          aria-label={`How ${courseCode} credits weight GPA`}
+          aria-expanded={showHelp}
+          title="How course credits weight GPA"
+          onClick={() => {
+            setShowPresets(false);
+            setShowHelp((prev) => !prev);
+          }}
+        >
+          ?
+        </button>
+      </div>
+
+      {showPresets && !disabled && (
+        <div
+          className="units-popover units-presets-popover"
+          role="group"
+          aria-label={`${courseCode} quick credit presets`}
+        >
+          <div className="units-popover-caption">Quick presets</div>
+          <div className="units-preset-chips">
+            {UNIT_OPTIONS.map((preset) => {
+              const isCurrent = Math.abs((units ?? 0) - preset) < 1e-9;
+              return (
+                <button
+                  key={preset}
+                  type="button"
+                  className={`units-preset-chip ${isCurrent ? 'active' : ''}`}
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => {
+                    dirtyRef.current = false;
+                    if (!Object.is(preset, units)) {
+                      onCommit(preset);
+                    }
+                    setDraft(formatUnitsDisplay(preset));
+                    setShowPresets(false);
+                    inputRef.current?.blur();
+                  }}
+                >
+                  {preset.toFixed(1)}
+                </button>
+              );
+            })}
+          </div>
+          <div className="units-popover-hint">
+            Or type any value (0–100)
+          </div>
+        </div>
+      )}
+
+      {showHelp && (
+        <div
+          className="units-popover units-help-popover"
+          role="region"
+          aria-label={`${courseCode} credit system guidance`}
+        >
+          <strong>Course-Units vs. Credit-Hours:</strong> Whether your school
+          uses <span className="tabular">0.5 / 1.0</span> course-units or{' '}
+          <span className="tabular">3 / 4 / 5</span> credit hours, GPA math is
+          identical as long as you stay consistent — a{' '}
+          <span className="tabular">4.0</span>-credit course carries twice the
+          GPA weight of a <span className="tabular">2.0</span>-credit course (
+          <span className="tabular">0</span> for non-credit seminars).
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function CourseCard({
   course,
   courseIndex,
@@ -166,6 +368,7 @@ export default function CourseCard({
   onDeleteCategory,
 }) {
   const [confirmingCatId, setConfirmingCatId] = useState(null);
+  const [hasOpenUnitsPopover, setHasOpenUnitsPopover] = useState(false);
 
   useEffect(() => {
     if (!confirmingCatId) return undefined;
@@ -200,15 +403,12 @@ export default function CourseCard({
       : 0;
 
   const otherTerms = terms.filter((t) => t.id !== activeTermId);
-  const unitChoices = UNIT_OPTIONS.includes(course.units)
-    ? UNIT_OPTIONS
-    : [...UNIT_OPTIONS, course.units].sort((a, b) => a - b);
 
   return (
     <section
       className={`course-sheet ${isCollapsed ? 'is-collapsed' : ''} ${
-        isDragging ? 'dragging' : ''
-      } ${isDragOver ? 'drag-over' : ''}`}
+        hasOpenUnitsPopover ? 'has-open-popover' : ''
+      } ${isDragging ? 'dragging' : ''} ${isDragOver ? 'drag-over' : ''}`}
       aria-label={`Course ${course.code}`}
       onDragOver={onDragOver}
       onDrop={onDrop}
@@ -269,22 +469,14 @@ export default function CourseCard({
         </div>
 
         <div className="units-group">
-          <label className="units-box" title="Course credit weight">
-            <span className="units-label">Units</span>
-            <select
-              className="units-select"
-              value={course.units}
-              disabled={readOnly}
-              aria-label={`${course.code} credit units`}
-              onChange={(e) => onUpdateCourse({ units: Number(e.target.value) })}
-            >
-              {unitChoices.map((u) => (
-                <option key={u} value={u}>
-                  {u}
-                </option>
-              ))}
-            </select>
-          </label>
+          <CourseCreditsControl
+            courseId={course.id}
+            courseCode={course.code}
+            units={course.units}
+            disabled={readOnly}
+            onCommit={(nextUnits) => onUpdateCourse({ units: nextUnits })}
+            onPopoverOpenChange={setHasOpenUnitsPopover}
+          />
 
           <button
             type="button"

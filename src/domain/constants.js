@@ -29,7 +29,7 @@ export const TARGET_PRESETS = [
   { label: 'Pass (50%)', pct: 50 },
 ];
 
-export const UNIT_OPTIONS = [0.25, 0.5, 1.0, 1.5, 2.0];
+export const UNIT_OPTIONS = [0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0];
 
 export const DURATION_OPTIONS = [
   { value: 'term', label: 'Single Term' },

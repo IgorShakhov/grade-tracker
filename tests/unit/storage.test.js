@@ -305,4 +305,18 @@ describe('StorageService & CloudSyncAdapter (storage.js)', () => {
     expect(svc.schemaTooNew).toBe(false);
     expect(() => svc.save(createInitialState())).not.toThrow();
   });
+
+  it('accepts arbitrary course credit weights in [0, 100] including 0-credit seminars and rejects negative or >100 values (#101)', () => {
+    const valid = createInitialState();
+    valid.terms[0].courses[0].units = 0; // non-credit seminar
+    valid.terms[0].courses[1].units = 4.5; // custom fractional lab credit
+    valid.terms[0].courses[2].units = 5; // 5-credit-hour course
+
+    const normalized = validateTrackerState(valid);
+    expect(normalized.terms[0].courses.map((c) => c.units)).toEqual([0, 4.5, 5]);
+
+    const negative = createInitialState();
+    negative.terms[0].courses[0].units = -0.5;
+    expect(() => validateTrackerState(negative)).toThrow(/units/i);
+  });
 });
