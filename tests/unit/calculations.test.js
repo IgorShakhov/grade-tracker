@@ -1540,5 +1540,104 @@ describe('Term GPA Trend & Grade Distribution Visuals (#102)', () => {
       units: 1,
       roundedPct: 25,
     });
+
+    // Regression (QA P1 #1): 12.0 GPA scales and non-canonical band.tier strings bucket accurately without dumping passing courses into tier-f
+    const twelvePointScale = [
+      { min: 90, max: 100, letter: 'A+', gpa: 12.0, tier: 'custom-honor' },
+      { min: 80, max: 89, letter: 'A-', gpa: 10.0 },
+      { min: 70, max: 79, letter: 'B', gpa: 8.0 },
+      { min: 60, max: 69, letter: 'C', gpa: 5.0 },
+      { min: 50, max: 59, letter: 'D', gpa: 2.0 },
+      { min: 0, max: 49, letter: 'F', gpa: 0.0 },
+    ];
+    const twelveVisuals = calculateGpaVisuals({
+      ...state,
+      gradeScale: twelvePointScale,
+    });
+    expect(twelveVisuals.scaleMaxGpa).toBe(12.0);
+    expect(twelveVisuals.distribution.find((b) => b.key === 'tier-a')?.count).toBe(2);
+    expect(twelveVisuals.distribution.find((b) => b.key === 'tier-b')?.count).toBe(1);
+    expect(twelveVisuals.distribution.find((b) => b.key === 'tier-f')?.count).toBe(0);
+  });
+});
+
+describe('Expandable Sub-Assessments & Drop Lowest N Math (#100)', () => {
+  it('keeps blank sub-items neutral, clamps dropLowest to m-1 so 1-item categories stay graded, and breaks ties deterministically', () => {
+    // 1. All sub-items blank -> category remains ungraded (remainingWeight = 100)
+    const ungradedCourse = {
+      id: 'c-sub-0',
+      code: 'CS101',
+      units: 1,
+      passFail: false,
+      targetPct: 85,
+      categories: [
+        {
+          id: 'cat-q',
+          name: 'Quizzes',
+          weight: 20,
+          grade: null,
+          dropLowest: 1,
+          items: [
+            { id: 'q1', name: 'Quiz 1', grade: null },
+            { id: 'q2', name: 'Quiz 2', grade: null },
+          ],
+        },
+        { id: 'cat-f', name: 'Final', weight: 80, grade: null },
+      ],
+    };
+    const s0 = calculateCourseStats(ungradedCourse);
+    expect(s0.overallGrade).toBeNull();
+    expect(s0.gradedWeight).toBe(0);
+    expect(s0.remainingWeight).toBe(100);
+    expect(s0.categoryBreakdowns[0].effectiveGrade).toBeNull();
+
+    // 2. Only 1 quiz graded (82%) with dropLowest = 1 -> clamps effectiveDropCount to 0 so Quiz 1 is NOT wiped
+    const oneGraded = structuredClone(ungradedCourse);
+    oneGraded.categories[0].items[0].grade = 82;
+    const s1 = calculateCourseStats(oneGraded);
+    expect(s1.categoryBreakdowns[0].effectiveDropCount).toBe(0);
+    expect(s1.categoryBreakdowns[0].effectiveGrade).toBe(82);
+    expect(s1.overallGrade).toBe(82);
+
+    // 3. 4 quizzes (70, 90, 70, 95) + 1 ungraded (null), dropLowest = 1 -> drops earlier tied 70 (index 0), keeps (90 + 70 + 95) / 3 = 85%
+    const fourGraded = {
+      id: 'c-sub-4',
+      code: 'CS101',
+      units: 1,
+      passFail: false,
+      targetPct: 85,
+      categories: [
+        {
+          id: 'cat-q',
+          name: 'Quizzes',
+          weight: 40,
+          grade: null,
+          dropLowest: 1,
+          items: [
+            { id: 'q1', name: 'Quiz 1', grade: 70 },
+            { id: 'q2', name: 'Quiz 2', grade: 90 },
+            { id: 'q3', name: 'Quiz 3', grade: 70 },
+            { id: 'q4', name: 'Quiz 4', grade: 95 },
+            { id: 'q5', name: 'Quiz 5', grade: null },
+          ],
+        },
+        { id: 'cat-m', name: 'Midterm', weight: 60, grade: 90 },
+      ],
+    };
+    const s4 = calculateCourseStats(fourGraded);
+    const qBreak = s4.categoryBreakdowns[0];
+    expect(qBreak.effectiveDropCount).toBe(1);
+    expect(qBreak.gradedSubItemCount).toBe(4);
+    expect(qBreak.keptSubItemCount).toBe(3);
+    expect(qBreak.effectiveGrade).toBeCloseTo(85, 6);
+    expect(qBreak.subItemBreakdowns.map((x) => x.isDropped)).toEqual([
+      true,
+      false,
+      false,
+      false,
+      false,
+    ]);
+    // Course grade: 0.40 * 85 + 0.60 * 90 = 34 + 54 = 88.00%
+    expect(s4.overallGrade).toBeCloseTo(88, 6);
   });
 });

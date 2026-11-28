@@ -281,9 +281,9 @@ describe('StorageService & CloudSyncAdapter (storage.js)', () => {
     const { SchemaTooNewError } = await import('../../src/services/storage.js');
     const futureDoc = {
       ...createInitialState(),
-      version: 2,
-      studentName: 'Future V2 User',
-      futureSubItemsFeature: [{ dropLowest: 2 }],
+      version: 3,
+      studentName: 'Future V3 User',
+      futureFeatureV3: [{ weights: true }],
     };
 
     expect(() => validateTrackerState(futureDoc)).toThrow(SchemaTooNewError);
@@ -295,7 +295,7 @@ describe('StorageService & CloudSyncAdapter (storage.js)', () => {
     const svc = new StorageService({ storage: mem });
     svc.load();
     expect(svc.schemaTooNew).toBe(true);
-    // Must NEVER overwrite or strip the v2 document in localStorage!
+    // Must NEVER overwrite or strip the v3 document in localStorage!
     expect(mem.getItem(STORAGE_KEY)).toBe(rawFuture);
     expect(() => svc.save(createInitialState())).toThrow(SchemaTooNewError);
     expect(mem.getItem(STORAGE_KEY)).toBe(rawFuture);
@@ -318,5 +318,70 @@ describe('StorageService & CloudSyncAdapter (storage.js)', () => {
     const negative = createInitialState();
     negative.terms[0].courses[0].units = -0.5;
     expect(() => validateTrackerState(negative)).toThrow(/units/i);
+  });
+
+  it('losslessly migrates v0 and v1 documents to schema v2, normalizes sub-items & dropLowest, and salvages valid sibling sub-items (#100)', () => {
+    const legacyV1 = {
+      ...createInitialState(),
+      version: 1,
+      studentName: 'Migrated Student',
+    };
+    const migrated = validateTrackerState(legacyV1);
+    expect(migrated.version).toBe(2);
+    expect(migrated.studentName).toBe('Migrated Student');
+    expect(migrated.terms[0].courses[0].categories[0]).toEqual({
+      id: 'econ-1',
+      name: 'Quizzes',
+      weight: 10,
+      grade: 90,
+    });
+
+    // Normalize category with sub-items and dropLowest
+    const withSubs = createInitialState();
+    withSubs.terms[0].courses[0].categories[0] = {
+      id: 'econ-1',
+      name: 'Quizzes',
+      weight: 10,
+      grade: null,
+      dropLowest: 1,
+      itemsExpanded: true,
+      items: [
+        { id: 'q-1', name: 'Quiz 1', grade: 92 },
+        { id: 'q-1', name: 'Quiz 2', grade: -0 }, // duplicate ID + -0 normalized cleanly
+        { name: 'Quiz 3', grade: null },
+      ],
+    };
+    const normalizedSubs = validateTrackerState(withSubs);
+    const quizCat = normalizedSubs.terms[0].courses[0].categories[0];
+    expect(quizCat).toMatchObject({
+      id: 'econ-1',
+      dropLowest: 1,
+      itemsExpanded: true,
+    });
+    expect(quizCat.items).toEqual([
+      { id: 'q-1', name: 'Quiz 1', grade: 92 },
+      { id: 'q-1-2', name: 'Quiz 2', grade: 0 },
+      { id: 'econ-1-sub-3', name: 'Quiz 3', grade: null },
+    ]);
+
+    // Invalid dropLowest rejected strictly
+    const badDrop = structuredClone(withSubs);
+    badDrop.terms[0].courses[0].categories[0].dropLowest = -1;
+    expect(() => validateTrackerState(badDrop)).toThrow(/dropLowest/i);
+
+    // Partial sub-item corruption salvages valid sibling sub-items without losing the Quizzes category
+    const corruptSubDoc = structuredClone(withSubs);
+    corruptSubDoc.terms[0].courses[0].categories[0].items[1].grade = 'corrupt';
+    const mem = createMemoryStorage();
+    mem.setItem(STORAGE_KEY, JSON.stringify(corruptSubDoc));
+    const svc = new StorageService({ storage: mem });
+    const recovered = svc.load();
+    expect(svc.getRecoveryNotice()).toMatchObject({
+      salvaged: true,
+      droppedCount: 1,
+    });
+    expect(
+      recovered.terms[0].courses[0].categories[0].items.map((s) => s.name),
+    ).toEqual(['Quiz 1', 'Quiz 3']);
   });
 });

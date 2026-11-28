@@ -1,4 +1,8 @@
-import { DEFAULT_GRADE_SCALE, MAX_GPA_POINTS } from '../domain/constants.js';
+import {
+  DEFAULT_GRADE_SCALE,
+  MAX_GPA_POINTS,
+  MAX_SUB_ITEMS_PER_CATEGORY,
+} from '../domain/constants.js';
 import { validateTrackerState } from './storage.js';
 
 const BASE64_CHUNK_SIZE = 0x8000;
@@ -139,7 +143,17 @@ export async function encodeShareSnapshot(state) {
           u: course.units,
           pf: course.passFail ? 1 : 0,
           tg: course.targetPct ?? 85,
-          k: course.categories.map((cat) => [cat.name, cat.weight, cat.grade]),
+          k: course.categories.map((cat) =>
+            Array.isArray(cat.items) && cat.items.length > 0
+              ? [
+                  cat.name,
+                  cat.weight,
+                  null,
+                  cat.items.map((sub) => [sub.name, sub.grade]),
+                  cat.dropLowest || 0,
+                ]
+              : [cat.name, cat.weight, cat.grade],
+          ),
         };
         if (course.duration === 'full-year') {
           entry.d = 'fy';
@@ -241,7 +255,7 @@ export async function decodeShareSnapshot(token) {
         if (!isPlainObject(c)) return null;
         if (typeof c.c !== 'string' || c.c.trim() === '') return null;
         if (c.t !== undefined && typeof c.t !== 'string') return null;
-        if (typeof c.u !== 'number' || !Number.isFinite(c.u) || c.u <= 0 || c.u > 100) return null;
+        if (typeof c.u !== 'number' || !Number.isFinite(c.u) || c.u < 0 || c.u > 100) return null;
         if (!Array.isArray(c.k)) return null;
         const unitsVal = c.u === 0 ? 0 : c.u;
 
@@ -257,7 +271,7 @@ export async function decodeShareSnapshot(token) {
         for (let kIdx = 0; kIdx < c.k.length; kIdx += 1) {
           const tuple = c.k[kIdx];
           if (!Array.isArray(tuple) || tuple.length < 2) return null;
-          const [catName, catWeight, catGrade] = tuple;
+          const [catName, catWeight, catGrade, rawSubTuples, rawDropLowest] = tuple;
           if (typeof catName !== 'string') return null;
           if (
             typeof catWeight !== 'number' ||
@@ -281,12 +295,64 @@ export async function decodeShareSnapshot(token) {
             gradeVal = catGrade === 0 ? 0 : catGrade;
           }
 
-          categories.push({
+          let decodedItems;
+          let decodedDropLowest = 0;
+          if (rawSubTuples !== undefined && rawSubTuples !== null) {
+            if (
+              !Array.isArray(rawSubTuples) ||
+              rawSubTuples.length > MAX_SUB_ITEMS_PER_CATEGORY
+            ) {
+              return null;
+            }
+            decodedItems = [];
+            for (let sIdx = 0; sIdx < rawSubTuples.length; sIdx += 1) {
+              const subTuple = rawSubTuples[sIdx];
+              if (!Array.isArray(subTuple) || subTuple.length < 1) return null;
+              const [subName, subGrade] = subTuple;
+              if (typeof subName !== 'string') return null;
+              let subGradeVal = null;
+              if (subGrade !== null && subGrade !== undefined) {
+                if (
+                  typeof subGrade !== 'number' ||
+                  !Number.isFinite(subGrade) ||
+                  subGrade < 0 ||
+                  subGrade > 1000
+                ) {
+                  return null;
+                }
+                subGradeVal = subGrade === 0 ? 0 : subGrade;
+              }
+              decodedItems.push({
+                id: `shared-sub-${tIdx}-${cIdx}-${kIdx}-${sIdx}`,
+                name: subName,
+                grade: subGradeVal,
+              });
+            }
+            if (rawDropLowest !== undefined && rawDropLowest !== null) {
+              if (
+                typeof rawDropLowest !== 'number' ||
+                !Number.isInteger(rawDropLowest) ||
+                rawDropLowest < 0 ||
+                rawDropLowest > 100
+              ) {
+                return null;
+              }
+              decodedDropLowest = rawDropLowest;
+            }
+          }
+
+          const catObj = {
             id: `shared-cat-${tIdx}-${cIdx}-${kIdx}`,
             name: catName,
             weight: weightVal,
             grade: gradeVal,
-          });
+          };
+          if (decodedItems && decodedItems.length > 0) {
+            catObj.items = decodedItems;
+            catObj.dropLowest = decodedDropLowest;
+            catObj.itemsExpanded = false;
+          }
+          categories.push(catObj);
         }
 
         const isPassFail = Boolean(c.pf !== undefined ? c.pf : c.cr);
@@ -321,7 +387,7 @@ export async function decodeShareSnapshot(token) {
         : 0;
 
     const reconstructed = {
-      version: 1,
+      version: 2,
       studentName: (compact.n || '').trim() || 'Shared',
       lastUpdated: (compact.u || '').trim() || new Date().toISOString(),
       activeTermId: terms[activeIdx].id,

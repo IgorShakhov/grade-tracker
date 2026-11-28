@@ -1,5 +1,10 @@
-import { STORAGE_KEY, DEFAULT_GRADE_SCALE, MAX_GPA_POINTS } from '../domain/constants.js';
-import { deriveTierFromGpa } from '../domain/calculations.js';
+import {
+  STORAGE_KEY,
+  DEFAULT_GRADE_SCALE,
+  MAX_GPA_POINTS,
+  MAX_SUB_ITEMS_PER_CATEGORY,
+} from '../domain/constants.js';
+import { deriveBandTier } from '../domain/calculations.js';
 import { createInitialState } from '../domain/templates.js';
 
 function isPlainObject(value) {
@@ -36,6 +41,7 @@ function normalizeGradeScale(rawScale) {
   }
 
   const normalized = [];
+  let maxGpa = 0;
   for (const band of rawScale) {
     if (!isPlainObject(band)) {
       return cloneDefaultGradeScale();
@@ -71,6 +77,7 @@ function normalizeGradeScale(rawScale) {
     const min = band.min === 0 ? 0 : band.min;
     const max = band.max === 0 ? 0 : band.max;
     const gpa = band.gpa === 0 ? 0 : band.gpa;
+    if (gpa > maxGpa) maxGpa = gpa;
     const letter = band.letter.trim();
     const rangeLabel = typeof band.rangeLabel === 'string' && band.rangeLabel.trim() !== ''
       ? band.rangeLabel.trim()
@@ -78,9 +85,9 @@ function normalizeGradeScale(rawScale) {
     const boundLabel = typeof band.boundLabel === 'string' && band.boundLabel.trim() !== ''
       ? band.boundLabel.trim()
       : `${max}%`;
-    const tier = typeof band.tier === 'string' && band.tier.trim() !== ''
+    const rawTier = typeof band.tier === 'string' && band.tier.trim() !== ''
       ? band.tier.trim()
-      : deriveTierFromGpa(gpa);
+      : '';
 
     normalized.push({
       min,
@@ -89,16 +96,22 @@ function normalizeGradeScale(rawScale) {
       boundLabel,
       letter,
       gpa,
-      tier,
+      tier: rawTier,
     });
+  }
+
+  const effectiveMaxGpa = maxGpa > 0 ? maxGpa : 4.0;
+  for (const band of normalized) {
+    band.tier = deriveBandTier(band, effectiveMaxGpa);
   }
 
   normalized.sort((a, b) => b.min - a.min);
   return normalized;
 }
 
-export const CURRENT_SCHEMA_VERSION = 1;
+export const CURRENT_SCHEMA_VERSION = 2;
 export const MAX_CORRUPT_BACKUPS = 2;
+export { MAX_SUB_ITEMS_PER_CATEGORY };
 
 export class SchemaTooNewError extends Error {
   constructor(foundVersion, maxSupportedVersion = CURRENT_SCHEMA_VERSION) {
@@ -119,10 +132,12 @@ export function isSchemaTooNewError(err) {
 }
 
 /**
- * Forward migration registry keyed by source schema version (`0 -> 1`, `1 -> 2`, ...).
- * Add `1: (rawV1) => ({ ... })` here when bumping `CURRENT_SCHEMA_VERSION` to `2` in M3.
+ * Forward migration registry keyed by source schema version (`0 -> 1`, `1 -> 2`).
  */
-const SCHEMA_MIGRATIONS = {};
+const SCHEMA_MIGRATIONS = {
+  0: (rawV0) => ({ ...rawV0, version: 1 }),
+  1: (rawV1) => ({ ...rawV1, version: 2 }),
+};
 
 function runSchemaMigrations(raw) {
   if (!isPlainObject(raw)) {
@@ -156,7 +171,60 @@ function runSchemaMigrations(raw) {
   return current;
 }
 
-function normalizeSingleCategory(cat, tIdx, cIdx, kIdx, courseCode, usedCatIds) {
+function normalizeSubItem(sub, catId, catName, courseCode, sIdx, usedSubItemIds) {
+  if (!isPlainObject(sub)) {
+    throw new Error(
+      `Invalid tracker state: sub-item at index ${sIdx} in "${catName}" (${courseCode}) must be an object.`,
+    );
+  }
+  if (sub.id !== undefined && typeof sub.id !== 'string') {
+    throw new Error(
+      `Invalid tracker state: sub-item at index ${sIdx} in "${catName}" (${courseCode}) has non-string "id".`,
+    );
+  }
+  if (typeof sub.name !== 'string') {
+    throw new Error(
+      `Invalid tracker state: sub-item at index ${sIdx} in "${catName}" (${courseCode}) must have a string "name".`,
+    );
+  }
+
+  let normalizedSubGrade = null;
+  if (sub.grade !== null && sub.grade !== undefined) {
+    if (
+      typeof sub.grade !== 'number' ||
+      !Number.isFinite(sub.grade) ||
+      sub.grade < 0 ||
+      sub.grade > 1000
+    ) {
+      throw new Error(
+        `Invalid tracker state: sub-item "${sub.name}" in "${catName}" (${courseCode}) must have null or a finite "grade" between 0 and 1000.`,
+      );
+    }
+    normalizedSubGrade = sub.grade === 0 ? 0 : sub.grade;
+  }
+
+  const subId = makeUniqueId(
+    sub.id,
+    `${catId}-sub-${sIdx + 1}`,
+    usedSubItemIds,
+  );
+
+  return {
+    id: subId,
+    name: sub.name,
+    grade: normalizedSubGrade,
+  };
+}
+
+function normalizeSingleCategory(
+  cat,
+  tIdx,
+  cIdx,
+  kIdx,
+  courseCode,
+  usedCatIds,
+  usedSubItemIds = new Set(),
+) {
   if (!isPlainObject(cat)) {
     throw new Error(
       `Invalid tracker state: category at index ${kIdx} in "${courseCode}" must be an object.`,
@@ -199,11 +267,64 @@ function normalizeSingleCategory(cat, tIdx, cIdx, kIdx, courseCode, usedCatIds) 
     normalizedGrade = cat.grade === 0 ? 0 : cat.grade;
   }
 
+  let normalizedDropLowest = 0;
+  if (cat.dropLowest !== undefined && cat.dropLowest !== null) {
+    if (
+      typeof cat.dropLowest !== 'number' ||
+      !Number.isInteger(cat.dropLowest) ||
+      cat.dropLowest < 0 ||
+      cat.dropLowest > 100
+    ) {
+      throw new Error(
+        `Invalid tracker state: category "${cat.name}" in "${courseCode}" must have an integer "dropLowest" between 0 and 100.`,
+      );
+    }
+    normalizedDropLowest = cat.dropLowest;
+  }
+
+  if (
+    cat.itemsExpanded !== undefined &&
+    typeof cat.itemsExpanded !== 'boolean'
+  ) {
+    throw new Error(
+      `Invalid tracker state: category "${cat.name}" in "${courseCode}" has non-boolean "itemsExpanded".`,
+    );
+  }
+
   const catId = makeUniqueId(
     cat.id,
     `cat-${tIdx + 1}-${cIdx + 1}-${kIdx + 1}`,
     usedCatIds,
   );
+
+  let normalizedItems = [];
+  if (cat.items !== undefined && cat.items !== null) {
+    if (!Array.isArray(cat.items)) {
+      throw new Error(
+        `Invalid tracker state: category "${cat.name}" in "${courseCode}" has non-array "items".`,
+      );
+    }
+    if (cat.items.length > MAX_SUB_ITEMS_PER_CATEGORY) {
+      throw new Error(
+        `Invalid tracker state: category "${cat.name}" in "${courseCode}" exceeds ${MAX_SUB_ITEMS_PER_CATEGORY} sub-items.`,
+      );
+    }
+    normalizedItems = cat.items.map((sub, sIdx) =>
+      normalizeSubItem(sub, catId, cat.name, courseCode, sIdx, usedSubItemIds),
+    );
+  }
+
+  if (normalizedItems.length > 0) {
+    return {
+      id: catId,
+      name: cat.name,
+      weight: normalizedWeight,
+      grade: null,
+      items: normalizedItems,
+      dropLowest: normalizedDropLowest,
+      itemsExpanded: Boolean(cat.itemsExpanded),
+    };
+  }
 
   return {
     id: catId,
@@ -337,6 +458,7 @@ export function validateTrackerState(raw) {
   const usedTermIds = new Set();
   const usedCourseIds = new Set();
   const usedCatIds = new Set();
+  const usedSubItemIds = new Set();
 
   const normalizedTerms = migrated.terms.map((term, tIdx) => {
     if (!isPlainObject(term)) {
@@ -380,6 +502,7 @@ export function validateTrackerState(raw) {
           kIdx,
           header.code,
           usedCatIds,
+          usedSubItemIds,
         ),
       );
       return {
@@ -451,6 +574,7 @@ function salvageTrackerState(raw) {
   const usedTermIds = new Set();
   const usedCourseIds = new Set();
   const usedCatIds = new Set();
+  const usedSubItemIds = new Set();
   let hadAnyRawCourses = false;
   let salvagedCourseCount = 0;
 
@@ -493,18 +617,86 @@ function salvageTrackerState(raw) {
 
       const salvagedCategories = [];
       course.categories.forEach((cat, kIdx) => {
+        const tempCatIds = new Set(usedCatIds);
+        const tempSubIds = new Set(usedSubItemIds);
         try {
-          salvagedCategories.push(
-            normalizeSingleCategory(
-              cat,
-              tIdx,
-              cIdx,
-              kIdx,
-              header.code,
-              usedCatIds,
-            ),
+          const okCat = normalizeSingleCategory(
+            cat,
+            tIdx,
+            cIdx,
+            kIdx,
+            header.code,
+            tempCatIds,
+            tempSubIds,
           );
+          for (const id of tempCatIds) usedCatIds.add(id);
+          for (const id of tempSubIds) usedSubItemIds.add(id);
+          salvagedCategories.push(okCat);
         } catch {
+          if (isPlainObject(cat) && Array.isArray(cat.items)) {
+            const validSubs = [];
+            cat.items.slice(0, MAX_SUB_ITEMS_PER_CATEGORY).forEach((sub, sIdx) => {
+              const probeSet = new Set(usedSubItemIds);
+              try {
+                validSubs.push(
+                  normalizeSubItem(
+                    sub,
+                    `salvage-${tIdx}-${cIdx}-${kIdx}`,
+                    String(cat.name || 'Category'),
+                    header.code,
+                    sIdx,
+                    probeSet,
+                  ),
+                );
+              } catch {
+                droppedCount += 1;
+              }
+            });
+            try {
+              const safeGrade =
+                validSubs.length > 0
+                  ? null
+                  : typeof cat.grade === 'number' &&
+                      Number.isFinite(cat.grade) &&
+                      cat.grade >= 0 &&
+                      cat.grade <= 1000
+                    ? (cat.grade === 0 ? 0 : cat.grade)
+                    : null;
+              const cleanedCat = {
+                ...cat,
+                grade: safeGrade,
+                dropLowest:
+                  typeof cat.dropLowest === 'number' &&
+                  Number.isInteger(cat.dropLowest) &&
+                  cat.dropLowest >= 0 &&
+                  cat.dropLowest <= 100
+                    ? cat.dropLowest
+                    : 0,
+                itemsExpanded:
+                  typeof cat.itemsExpanded === 'boolean'
+                    ? cat.itemsExpanded
+                    : false,
+                items: validSubs,
+              };
+              salvagedCategories.push(
+                normalizeSingleCategory(
+                  cleanedCat,
+                  tIdx,
+                  cIdx,
+                  kIdx,
+                  header.code,
+                  usedCatIds,
+                  usedSubItemIds,
+                ),
+              );
+              if (validSubs.length === cat.items.length) {
+                droppedCount += 1;
+              }
+              return;
+            } catch {
+              // Category header itself is unrecoverable
+            }
+          }
           droppedCount += 1;
         }
       });

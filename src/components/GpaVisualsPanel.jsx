@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useId, useState } from 'react';
 import { formatGpa, formatPercent, roundHalfUp } from '../domain/calculations.js';
 
 function truncateAxisLabel(name, maxLen) {
@@ -9,7 +9,8 @@ function truncateAxisLabel(name, maxLen) {
 
 function formatUnitsCompact(units) {
   if (typeof units !== 'number' || !Number.isFinite(units)) return '0';
-  return Number.isInteger(units) ? units.toFixed(1) : String(roundHalfUp(units, 2));
+  const rounded = roundHalfUp(units, 2);
+  return Number.isInteger(rounded) ? rounded.toFixed(1) : String(rounded);
 }
 
 export default function GpaVisualsPanel({
@@ -18,7 +19,12 @@ export default function GpaVisualsPanel({
   simMode = false,
   onSelectTerm,
 }) {
-  const [hoveredTermId, setHoveredTermId] = useState(null);
+  const rawGradientId = useId();
+  const areaGradientId = `gt-gpa-area-${rawGradientId.replace(/[^a-zA-Z0-9_-]/g, '')}`;
+  const [hoverState, setHoverState] = useState({
+    forActiveTermId: null,
+    termId: null,
+  });
 
   const {
     scaleMaxGpa = 4.0,
@@ -29,12 +35,23 @@ export default function GpaVisualsPanel({
     distribution = [],
   } = visuals || {};
 
+  const effectiveHoveredTermId =
+    hoverState.forActiveTermId === activeTermId ? hoverState.termId : null;
+
   const focusedTerm =
-    (hoveredTermId && termSeries.find((t) => t.termId === hoveredTermId)) ||
+    (effectiveHoveredTermId &&
+      termSeries.find((t) => t.termId === effectiveHoveredTermId)) ||
     (activeTermId && termSeries.find((t) => t.termId === activeTermId)) ||
     [...termSeries].reverse().find((t) => t.termGpa !== null) ||
     termSeries[termSeries.length - 1] ||
     null;
+
+  function setHoveredTermId(nextTermId) {
+    setHoverState({
+      forActiveTermId: activeTermId ?? null,
+      termId: nextTermId,
+    });
+  }
 
   const observedGpas = [];
   for (const item of termSeries) {
@@ -63,6 +80,8 @@ export default function GpaVisualsPanel({
   }
 
   const maxTickChars = termSeries.length >= 6 ? 6 : termSeries.length >= 4 ? 9 : 13;
+  const labelStep = termSeries.length > 7 ? Math.ceil(termSeries.length / 5) : 1;
+
   const points = termSeries.map((item, idx) => {
     const x =
       termSeries.length === 1
@@ -73,6 +92,7 @@ export default function GpaVisualsPanel({
       item.runningCumulativeGpa !== null ? gpaToY(item.runningCumulativeGpa) : null;
     return {
       ...item,
+      idx,
       x,
       termY,
       cumY,
@@ -82,6 +102,8 @@ export default function GpaVisualsPanel({
 
   const gradedTermPoints = points.filter((p) => p.termY !== null);
   const gradedCumPoints = points.filter((p) => p.cumY !== null);
+  const showCumulativeSeries =
+    gradedTermPoints.length >= 2 && gradedCumPoints.length >= 2;
 
   const termPolyline = gradedTermPoints
     .map((p) => `${p.x.toFixed(1)},${p.termY.toFixed(1)}`)
@@ -154,18 +176,23 @@ export default function GpaVisualsPanel({
                 )}
               </div>
             ) : (
-              <span className="gpa-visuals-meta">No GPA points yet</span>
+              <span className="gpa-visuals-meta">
+                {focusedTerm ? `${focusedTerm.termName}: ` : ''}No GPA points yet
+              </span>
             )}
           </div>
 
           {gradedTermCount === 0 ? (
             <p className="gpa-visuals-empty">
-              Enter grades in at least one non-Pass/Fail course to plot your term GPA
-              progression.
+              Enter grades in at least one credit-bearing non-Pass/Fail course to
+              plot your term GPA progression.
             </p>
           ) : (
             <>
-              <div className="gpa-svg-wrap">
+              <div
+                className="gpa-svg-wrap"
+                onMouseLeave={() => setHoveredTermId(null)}
+              >
                 <svg
                   viewBox="0 0 320 102"
                   className="gpa-trend-svg"
@@ -173,7 +200,7 @@ export default function GpaVisualsPanel({
                   aria-label={chartSummaryText}
                 >
                   <defs>
-                    <linearGradient id="gt-gpa-area-grad" x1="0" y1="0" x2="0" y2="1">
+                    <linearGradient id={areaGradientId} x1="0" y1="0" x2="0" y2="1">
                       <stop offset="0%" stopColor="hsl(212, 68%, 24%)" stopOpacity="0.16" />
                       <stop offset="100%" stopColor="hsl(212, 68%, 24%)" stopOpacity="0.01" />
                     </linearGradient>
@@ -221,10 +248,10 @@ export default function GpaVisualsPanel({
                   )}
 
                   {/* Area under Term GPA curve */}
-                  {areaPath && <path d={areaPath} fill="url(#gt-gpa-area-grad)" />}
+                  {areaPath && <path d={areaPath} fill={`url(#${areaGradientId})`} />}
 
                   {/* Running Cumulative GPA dashed line (when 2+ graded terms) */}
-                  {gradedCumPoints.length >= 2 && (
+                  {showCumulativeSeries && (
                     <polyline
                       fill="none"
                       stroke="hsl(168, 64%, 30%)"
@@ -249,14 +276,21 @@ export default function GpaVisualsPanel({
                   {/* Term data nodes + X-axis labels */}
                   {points.map((p) => {
                     const isFocused = focusedTerm?.termId === p.termId;
-                    const cy = p.termY !== null ? p.termY : (yTop + yBottom) / 2;
+                    const cy = p.termY !== null ? p.termY : yBottom;
+                    const showTickLabel =
+                      points.length <= 7 ||
+                      isFocused ||
+                      p.idx === 0 ||
+                      p.idx === points.length - 1 ||
+                      p.idx % labelStep === 0;
+
                     return (
                       <g
                         key={p.termId}
                         className="gpa-svg-node"
                         onMouseEnter={() => setHoveredTermId(p.termId)}
                         onClick={() => {
-                          setHoveredTermId(p.termId);
+                          setHoveredTermId(null);
                           onSelectTerm?.(p.termId);
                         }}
                       >
@@ -284,16 +318,18 @@ export default function GpaVisualsPanel({
                             strokeWidth="1.4"
                           />
                         )}
-                        <text
-                          x={p.x}
-                          y={95}
-                          textAnchor="middle"
-                          className={`gpa-svg-term-label ${
-                            isFocused ? 'is-focused' : ''
-                          }`}
-                        >
-                          {p.shortName}
-                        </text>
+                        {showTickLabel && (
+                          <text
+                            x={p.x}
+                            y={95}
+                            textAnchor="middle"
+                            className={`gpa-svg-term-label ${
+                              isFocused ? 'is-focused' : ''
+                            }`}
+                          >
+                            {p.shortName}
+                          </text>
+                        )}
                       </g>
                     );
                   })}
@@ -305,6 +341,7 @@ export default function GpaVisualsPanel({
                   className="gpa-trend-chips"
                   role="group"
                   aria-label="Inspect term GPA details"
+                  onMouseLeave={() => setHoveredTermId(null)}
                 >
                   {termSeries.map((t) => {
                     const isCurrent = focusedTerm?.termId === t.termId;
@@ -316,8 +353,9 @@ export default function GpaVisualsPanel({
                         aria-pressed={isCurrent}
                         onMouseEnter={() => setHoveredTermId(t.termId)}
                         onFocus={() => setHoveredTermId(t.termId)}
+                        onBlur={() => setHoveredTermId(null)}
                         onClick={() => {
-                          setHoveredTermId(t.termId);
+                          setHoveredTermId(null);
                           onSelectTerm?.(t.termId);
                         }}
                       >
@@ -330,7 +368,7 @@ export default function GpaVisualsPanel({
                   })}
                 </div>
 
-                {gradedCumPoints.length >= 2 ? (
+                {showCumulativeSeries ? (
                   <div className="gpa-chart-legend">
                     <span className="legend-item">
                       <span className="legend-swatch swatch-solid" aria-hidden="true" />
@@ -381,7 +419,7 @@ export default function GpaVisualsPanel({
                   }
                 >
                   <div className="gpa-dist-row-top">
-                    <span className={`grade-pill ${bucket.tier} dist-tier-pill`}>
+                    <span className={`letter-badge ${bucket.tier} dist-tier-pill`}>
                       {bucket.label}
                     </span>
                     <span className="gpa-dist-stat tabular">

@@ -1220,12 +1220,12 @@ describe('CloudSyncManager & Firestore Security Rules Invariants (cloudSync.js)'
     await mgr.signInWithGoogle();
     expect(batchCommitCalls).toBe(1);
 
-    // Newer client writes schema version 2 with sub-assessments field to Firestore
+    // Newer client writes schema version 3 with future field to Firestore
     const futureRemote = {
       ...createInitialState(),
-      version: 2,
+      version: 3,
       studentName: 'Future Schema',
-      subAssessmentsV2: { enabled: true },
+      futureFieldV3: { enabled: true },
     };
     const rawFutureJson = JSON.stringify(futureRemote);
     fbMock.seedDirect('users/user-v2', {

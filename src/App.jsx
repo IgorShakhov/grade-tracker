@@ -13,6 +13,14 @@ import {
   moveCourseToTerm,
   duplicateCourseInTerm,
   setAllCoursesCollapsed,
+  splitCategoryIntoSubItems,
+  collapseCategoryToSingleScore,
+  addSubItemToCategory,
+  updateSubItemInCategory,
+  deleteSubItemFromCategory,
+  reorderSubItemsInCategory,
+  setCategoryDropLowest,
+  setCategoryItemsExpanded,
 } from './domain/operations.js';
 import { calculateAllStats } from './domain/calculations.js';
 import { storageService } from './services/storage.js';
@@ -65,18 +73,42 @@ const COALESCE_WINDOW_MS = 700;
 
 /**
  * Compares sandboxState against baseState to identify every modified/added
- * assessment category and count total simulated changes.
+ * assessment category or sub-assessment item and count total simulated changes.
  */
 function computeSandboxDiff(baseState, sandboxState) {
   if (!sandboxState || !baseState) {
-    return { modifiedCatIds: new Set(), changeCount: 0 };
+    return {
+      modifiedCatIds: new Set(),
+      modifiedSubItemIds: new Set(),
+      changeCount: 0,
+    };
   }
 
+  let changeCount = 0;
+
+  if ((baseState.studentName || '') !== (sandboxState.studentName || '')) {
+    changeCount += 1;
+  }
+
+  const baseScaleSig = JSON.stringify(
+    (baseState.gradeScale || []).map((b) => [b.min, b.max, b.letter, b.gpa]),
+  );
+  const sandScaleSig = JSON.stringify(
+    (sandboxState.gradeScale || []).map((b) => [b.min, b.max, b.letter, b.gpa]),
+  );
+  if (baseScaleSig !== sandScaleSig) {
+    changeCount += 1;
+  }
+
+  const baseTerms = new Map();
   const baseCourses = new Map();
+  const baseCourseTerm = new Map();
   const baseCats = new Map();
   for (const term of baseState.terms || []) {
+    baseTerms.set(term.id, term);
     for (const course of term.courses || []) {
       baseCourses.set(course.id, course);
+      baseCourseTerm.set(course.id, term.id);
       for (const cat of course.categories || []) {
         baseCats.set(cat.id, cat);
       }
@@ -84,12 +116,24 @@ function computeSandboxDiff(baseState, sandboxState) {
   }
 
   const modifiedCatIds = new Set();
-  let changeCount = 0;
+  const modifiedSubItemIds = new Set();
 
+  const sandboxTermIds = new Set();
   const sandboxCourseIds = new Set();
   const sandboxCatIds = new Set();
 
   for (const term of sandboxState.terms || []) {
+    sandboxTermIds.add(term.id);
+    const origTerm = baseTerms.get(term.id);
+    if (!origTerm || origTerm.name !== term.name) {
+      changeCount += 1;
+    } else if (
+      origTerm.courses.length === term.courses.length &&
+      term.courses.some((c, i) => origTerm.courses[i]?.id !== c.id)
+    ) {
+      changeCount += 1;
+    }
+
     for (const course of term.courses || []) {
       sandboxCourseIds.add(course.id);
       const origCourse = baseCourses.get(course.id);
@@ -97,7 +141,14 @@ function computeSandboxDiff(baseState, sandboxState) {
         changeCount += 1;
       } else if (
         origCourse.units !== course.units ||
-        Boolean(origCourse.passFail) !== Boolean(course.passFail)
+        Boolean(origCourse.passFail) !== Boolean(course.passFail) ||
+        origCourse.targetPct !== course.targetPct ||
+        origCourse.duration !== course.duration ||
+        origCourse.code !== course.code ||
+        origCourse.title !== course.title ||
+        baseCourseTerm.get(course.id) !== term.id ||
+        (origCourse.categories.length === course.categories.length &&
+          course.categories.some((k, i) => origCourse.categories[i]?.id !== k.id))
       ) {
         changeCount += 1;
       }
@@ -105,19 +156,64 @@ function computeSandboxDiff(baseState, sandboxState) {
       for (const cat of course.categories || []) {
         sandboxCatIds.add(cat.id);
         const origCat = baseCats.get(cat.id);
+        const origHasSubs = Array.isArray(origCat?.items) && origCat.items.length > 0;
+        const curHasSubs = Array.isArray(cat.items) && cat.items.length > 0;
+
         if (
           !origCat ||
           origCat.grade !== cat.grade ||
           origCat.weight !== cat.weight ||
-          origCat.name !== cat.name
+          origCat.name !== cat.name ||
+          (origCat.dropLowest || 0) !== (cat.dropLowest || 0) ||
+          origHasSubs !== curHasSubs
         ) {
           modifiedCatIds.add(cat.id);
           changeCount += 1;
+        }
+
+        if (curHasSubs) {
+          const origSubs = new Map(
+            (origCat?.items || []).map((s) => [s.id, s]),
+          );
+          const curSubIds = new Set();
+          for (const sub of cat.items) {
+            curSubIds.add(sub.id);
+            const origSub = origSubs.get(sub.id);
+            if (
+              !origSub ||
+              origSub.grade !== sub.grade ||
+              origSub.name !== sub.name
+            ) {
+              modifiedSubItemIds.add(sub.id);
+              modifiedCatIds.add(cat.id);
+              changeCount += 1;
+            }
+          }
+          let hadDeletedSub = false;
+          for (const origSubId of origSubs.keys()) {
+            if (!curSubIds.has(origSubId)) {
+              hadDeletedSub = true;
+              modifiedCatIds.add(cat.id);
+              changeCount += 1;
+            }
+          }
+          if (
+            origHasSubs &&
+            !hadDeletedSub &&
+            origCat.items.length === cat.items.length &&
+            cat.items.some((s, idx) => origCat.items[idx]?.id !== s.id)
+          ) {
+            modifiedCatIds.add(cat.id);
+            changeCount += 1;
+          }
         }
       }
     }
   }
 
+  for (const origTermId of baseTerms.keys()) {
+    if (!sandboxTermIds.has(origTermId)) changeCount += 1;
+  }
   for (const origCourseId of baseCourses.keys()) {
     if (!sandboxCourseIds.has(origCourseId)) changeCount += 1;
   }
@@ -125,7 +221,7 @@ function computeSandboxDiff(baseState, sandboxState) {
     if (!sandboxCatIds.has(origCatId)) changeCount += 1;
   }
 
-  return { modifiedCatIds, changeCount };
+  return { modifiedCatIds, modifiedSubItemIds, changeCount };
 }
 
 function serializeStateExcludingTimestamp(s) {
@@ -147,26 +243,43 @@ function areStatesIdenticalExcludingTimestamp(a, b) {
 }
 
 /**
- * Preserves local UI view state (`collapsed` per course and `activeTermId` when
- * the set of term IDs is unchanged) across Undo / Redo snapshots (#52).
+ * Preserves local UI view state (`collapsed` per course, `itemsExpanded` per category,
+ * and `activeTermId` when the set of term IDs is unchanged) across Undo / Redo snapshots (#52, #100).
  */
 function preserveCurrentUiState(targetSnapshot, currentState) {
   if (!targetSnapshot || !currentState) return targetSnapshot;
 
   const collapsedByCourseId = new Map();
+  const itemsExpandedByCatId = new Map();
   for (const term of currentState.terms || []) {
     for (const course of term.courses || []) {
       collapsedByCourseId.set(course.id, Boolean(course.collapsed));
+      for (const cat of course.categories || []) {
+        if (Array.isArray(cat.items) && cat.items.length > 0) {
+          itemsExpandedByCatId.set(cat.id, Boolean(cat.itemsExpanded));
+        }
+      }
     }
   }
 
   const targetTerms = (targetSnapshot.terms || []).map((term) => ({
     ...term,
-    courses: (term.courses || []).map((course) =>
-      collapsedByCourseId.has(course.id)
-        ? { ...course, collapsed: collapsedByCourseId.get(course.id) }
-        : course,
-    ),
+    courses: (term.courses || []).map((course) => {
+      const nextCategories = (course.categories || []).map((cat) =>
+        Array.isArray(cat.items) &&
+        cat.items.length > 0 &&
+        itemsExpandedByCatId.has(cat.id)
+          ? { ...cat, itemsExpanded: itemsExpandedByCatId.get(cat.id) }
+          : cat,
+      );
+      return {
+        ...course,
+        ...(collapsedByCourseId.has(course.id)
+          ? { collapsed: collapsedByCourseId.get(course.id) }
+          : {}),
+        categories: nextCategories,
+      };
+    }),
   }));
 
   const currentTermIds = (currentState.terms || []).map((t) => t.id).join('\0');
@@ -504,7 +617,11 @@ export default function App() {
   const baseState = sharedState || state;
   const activeState = sandboxState || baseState;
 
-  const { modifiedCatIds: simModifiedCatIds, changeCount: simCount } = useMemo(
+  const {
+    modifiedCatIds: simModifiedCatIds,
+    modifiedSubItemIds: simModifiedSubItemIds,
+    changeCount: simCount,
+  } = useMemo(
     () => computeSandboxDiff(baseState, sandboxState),
     [baseState, sandboxState],
   );
@@ -1309,6 +1426,85 @@ export default function App() {
     showToast(`Deleted "${catName}".`);
   }
 
+  function handleToggleCategoryItemsExpanded(courseId, catId, expanded) {
+    if (isSharedReadOnly && !simMode) {
+      setSharedState((prev) =>
+        setCategoryItemsExpanded(prev, activeTerm.id, courseId, catId, expanded),
+      );
+      return;
+    }
+    updateCurrentWithoutHistory((prev) =>
+      setCategoryItemsExpanded(prev, activeTerm.id, courseId, catId, expanded),
+    );
+  }
+
+  function handleSplitCategory(courseId, catId) {
+    commitState((prev) =>
+      splitCategoryIntoSubItems(prev, activeTerm.id, courseId, catId),
+    );
+  }
+
+  function handleCollapseCategoryToSingleScore(courseId, catId, mergedGrade) {
+    commitState((prev) =>
+      collapseCategoryToSingleScore(
+        prev,
+        activeTerm.id,
+        courseId,
+        catId,
+        mergedGrade,
+      ),
+    );
+  }
+
+  function handleAddSubItem(courseId, catId) {
+    commitState((prev) =>
+      addSubItemToCategory(prev, activeTerm.id, courseId, catId),
+    );
+  }
+
+  function handleUpdateSubItem(courseId, catId, subItemId, patch) {
+    const keys = Object.keys(patch || {});
+    if (keys.length === 0) return;
+    commitState(
+      (prev) =>
+        updateSubItemInCategory(
+          prev,
+          activeTerm.id,
+          courseId,
+          catId,
+          subItemId,
+          patch,
+        ),
+      { coalesceKey: `sub-${subItemId}-${keys[0]}` },
+    );
+  }
+
+  function handleDeleteSubItem(courseId, catId, subItemId, subName = 'Item') {
+    commitState((prev) =>
+      deleteSubItemFromCategory(prev, activeTerm.id, courseId, catId, subItemId),
+    );
+    showToast(`Deleted "${subName}".`);
+  }
+
+  function handleReorderSubItem(courseId, catId, fromIndex, toIndex) {
+    commitState((prev) =>
+      reorderSubItemsInCategory(
+        prev,
+        activeTerm.id,
+        courseId,
+        catId,
+        fromIndex,
+        toIndex,
+      ),
+    );
+  }
+
+  function handleSetCategoryDropLowest(courseId, catId, dropLowest) {
+    commitState((prev) =>
+      setCategoryDropLowest(prev, activeTerm.id, courseId, catId, dropLowest),
+    );
+  }
+
   const allExistingCourses = activeState.terms.flatMap((t) => t.courses);
 
   return (
@@ -1525,6 +1721,7 @@ export default function App() {
                 readOnly={readOnly}
                 simMode={simMode}
                 simModifiedCatIds={simModifiedCatIds}
+                simModifiedSubItemIds={simModifiedSubItemIds}
                 isDragging={dragIndex === idx}
                 isDragOver={dragOverIndex === idx && dragIndex !== idx}
                 onDragStart={() => setDragIndex(idx)}
@@ -1588,6 +1785,30 @@ export default function App() {
                 }
                 onDeleteCategory={(catId, catName) =>
                   handleDeleteCategory(course.id, catId, catName)
+                }
+                onToggleCategoryItemsExpanded={(catId, expanded) =>
+                  handleToggleCategoryItemsExpanded(course.id, catId, expanded)
+                }
+                onSplitCategory={(catId) => handleSplitCategory(course.id, catId)}
+                onCollapseCategoryToSingleScore={(catId, mergedGrade) =>
+                  handleCollapseCategoryToSingleScore(
+                    course.id,
+                    catId,
+                    mergedGrade,
+                  )
+                }
+                onAddSubItem={(catId) => handleAddSubItem(course.id, catId)}
+                onUpdateSubItem={(catId, subItemId, patch) =>
+                  handleUpdateSubItem(course.id, catId, subItemId, patch)
+                }
+                onDeleteSubItem={(catId, subItemId, subName) =>
+                  handleDeleteSubItem(course.id, catId, subItemId, subName)
+                }
+                onReorderSubItem={(catId, from, to) =>
+                  handleReorderSubItem(course.id, catId, from, to)
+                }
+                onSetCategoryDropLowest={(catId, dropLowest) =>
+                  handleSetCategoryDropLowest(course.id, catId, dropLowest)
                 }
               />
             ))}

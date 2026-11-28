@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo, useRef } from 'react';
 import { DEFAULT_GRADE_SCALE, MAX_GPA_POINTS } from '../domain/constants.js';
-import { deriveTierFromGpa } from '../domain/calculations.js';
+import { deriveBandTier } from '../domain/calculations.js';
 import { useDialogFocus } from './useDialogFocus.js';
 
 const SCALE_DECIMAL_RE = /^(?:\d+(?:\.\d*)?|\.\d+)$/;
@@ -360,7 +360,7 @@ export function ScaleEditorModal({ gradeScale, onSaveScale, onClose }) {
         boundLabel: `${max}%`,
         letter,
         gpa,
-        tier: deriveTierFromGpa(gpa),
+        tier: 'tier-f',
       });
     }
 
@@ -392,6 +392,10 @@ export function ScaleEditorModal({ gradeScale, onSaveScale, onClose }) {
       return;
     }
 
+    const scaleMaxGpa = Math.max(4.0, ...parsed.map((b) => b.gpa));
+    for (const band of parsed) {
+      band.tier = deriveBandTier(band, scaleMaxGpa);
+    }
     parsed.sort((a, b) => b.min - a.min);
     onSaveScale(parsed);
     onClose();

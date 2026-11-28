@@ -1,5 +1,5 @@
-import { useState, useEffect, useMemo, useRef } from 'react';
-import { UNIT_OPTIONS } from '../domain/constants.js';
+import { Fragment, useState, useEffect, useMemo, useRef } from 'react';
+import { UNIT_OPTIONS, MAX_SUB_ITEMS_PER_CATEGORY } from '../domain/constants.js';
 import {
   calculateCourseStats,
   buildTargetOptions,
@@ -210,7 +210,10 @@ function CourseCreditsControl({
   return (
     <div ref={groupRef} className="units-control-wrap">
       <div className="units-box">
-        <label className="units-label" htmlFor={inputId}>
+        <label
+          className={`units-label ${disabled ? 'is-disabled' : ''}`.trim()}
+          htmlFor={inputId}
+        >
           Credits
         </label>
         <input
@@ -221,7 +224,7 @@ function CourseCreditsControl({
           className="units-input"
           value={displayedValue}
           disabled={disabled}
-          aria-label={`${courseCode} credit units`}
+          aria-label={`${courseCode} credits`}
           onFocus={(e) => {
             const full =
               typeof units === 'number' && Number.isFinite(units)
@@ -351,6 +354,7 @@ export default function CourseCard({
   readOnly,
   simMode,
   simModifiedCatIds,
+  simModifiedSubItemIds,
   isDragging,
   isDragOver,
   onDragStart,
@@ -366,8 +370,17 @@ export default function CourseCard({
   onUpdateCategory,
   onReorderCategory,
   onDeleteCategory,
+  onToggleCategoryItemsExpanded,
+  onSplitCategory,
+  onCollapseCategoryToSingleScore,
+  onAddSubItem,
+  onUpdateSubItem,
+  onDeleteSubItem,
+  onReorderSubItem,
+  onSetCategoryDropLowest,
 }) {
   const [confirmingCatId, setConfirmingCatId] = useState(null);
+  const [confirmingSubId, setConfirmingSubId] = useState(null);
   const [hasOpenUnitsPopover, setHasOpenUnitsPopover] = useState(false);
 
   useEffect(() => {
@@ -375,6 +388,12 @@ export default function CourseCard({
     const timer = setTimeout(() => setConfirmingCatId(null), 4500);
     return () => clearTimeout(timer);
   }, [confirmingCatId]);
+
+  useEffect(() => {
+    if (!confirmingSubId) return undefined;
+    const timer = setTimeout(() => setConfirmingSubId(null), 4500);
+    return () => clearTimeout(timer);
+  }, [confirmingSubId]);
 
   const codeDraft = useDraftText(course.code || 'COURSE', {
     onCommit: (nextCode) => onUpdateCourse({ code: nextCode }),
@@ -600,126 +619,504 @@ export default function CourseCard({
                   const isRowSimulated =
                     simMode && Boolean(simModifiedCatIds?.has(cat.id));
                   const isBlankInSim =
-                    simMode && (cat.grade === null || cat.grade === undefined);
+                    simMode &&
+                    !cat.hasSubItems &&
+                    (cat.grade === null || cat.grade === undefined);
+                  const isCatExpanded =
+                    cat.hasSubItems && Boolean(cat.itemsExpanded);
+                  const subCount = cat.subItemBreakdowns?.length || 0;
+                  const maxDropChip = Math.min(
+                    4,
+                    Math.max(2, subCount - 1, cat.configuredDropLowest || 0),
+                  );
+                  const dropOptions = [];
+                  for (let n = 0; n <= maxDropChip; n += 1) {
+                    dropOptions.push(n);
+                  }
+                  if (
+                    cat.configuredDropLowest > maxDropChip &&
+                    !dropOptions.includes(cat.configuredDropLowest)
+                  ) {
+                    dropOptions.push(cat.configuredDropLowest);
+                  }
 
                   return (
-                    <tr
-                      key={cat.id}
-                      className={isRowSimulated ? 'row-simulated' : ''}
-                    >
-                      {!readOnly && (
-                        <td>
-                          <span className="row-order-btns">
-                            <button
-                              type="button"
-                              className="mini-arrow-btn"
-                              disabled={idx === 0}
-                              onClick={() => onReorderCategory(idx, idx - 1)}
-                              title="Move row up"
-                              aria-label={`Move ${cat.name} up`}
-                            >
-                              ↑
-                            </button>
-                            <button
-                              type="button"
-                              className="mini-arrow-btn"
-                              disabled={idx === stats.categoryBreakdowns.length - 1}
-                              onClick={() => onReorderCategory(idx, idx + 1)}
-                              title="Move row down"
-                              aria-label={`Move ${cat.name} down`}
-                            >
-                              ↓
-                            </button>
-                          </span>
-                        </td>
-                      )}
-
-                      <td>
-                        <input
-                          type="text"
-                          className="cell-input"
-                          value={cat.name}
-                          disabled={readOnly}
-                          placeholder="Assessment name"
-                          aria-label={`${course.code} category ${idx + 1} name`}
-                          onChange={(e) =>
-                            onUpdateCategory(cat.id, { name: e.target.value })
-                          }
-                        />
-                      </td>
-
-                      <td>
-                        <NumericCellInput
-                          value={cat.weight}
-                          placeholder="0.00"
-                          disabled={readOnly}
-                          ariaLabel={`${course.code} ${cat.name} weight percent`}
-                          onCommit={(val) =>
-                            onUpdateCategory(cat.id, { weight: val ?? 0 })
-                          }
-                        />
-                      </td>
-
-                      <td>
-                        <NumericCellInput
-                          value={cat.grade}
-                          placeholder={simMode ? 'What-if %' : '—'}
-                          disabled={readOnly}
-                          isSimInput={isRowSimulated || isBlankInSim}
-                          ariaLabel={`${course.code} ${cat.name} grade percent`}
-                          onCommit={(val) => {
-                            if (!readOnly) {
-                              onUpdateCategory(cat.id, { grade: val });
-                            }
-                          }}
-                        />
-                      </td>
-
-                      <td className="contrib-cell">
-                        {cat.contribution !== null
-                          ? `${cat.contribution.toFixed(2)}%`
-                          : '—'}
-                      </td>
-
-                      {!readOnly && (
-                        <td style={{ textAlign: 'right' }}>
-                          {confirmingCatId === cat.id ? (
-                            <span className="inline-confirm-wrap">
+                    <Fragment key={cat.id}>
+                      <tr
+                        className={`${isRowSimulated ? 'row-simulated' : ''} ${
+                          cat.hasSubItems ? 'row-has-subitems' : ''
+                        }`.trim()}
+                      >
+                        {!readOnly && (
+                          <td>
+                            <span className="row-order-btns">
                               <button
                                 type="button"
-                                className="inline-confirm-btn"
-                                onClick={() => {
-                                  setConfirmingCatId(null);
-                                  onDeleteCategory(cat.id, cat.name);
-                                }}
-                                aria-label={`Confirm delete ${cat.name}`}
+                                className="mini-arrow-btn"
+                                disabled={idx === 0}
+                                onClick={() => onReorderCategory(idx, idx - 1)}
+                                title="Move row up"
+                                aria-label={`Move ${cat.name} up`}
                               >
-                                Delete?
+                                ↑
                               </button>
                               <button
                                 type="button"
-                                className="inline-cancel-btn"
-                                onClick={() => setConfirmingCatId(null)}
-                                title="Cancel"
-                                aria-label={`Cancel delete ${cat.name}`}
+                                className="mini-arrow-btn"
+                                disabled={
+                                  idx === stats.categoryBreakdowns.length - 1
+                                }
+                                onClick={() => onReorderCategory(idx, idx + 1)}
+                                title="Move row down"
+                                aria-label={`Move ${cat.name} down`}
+                              >
+                                ↓
+                              </button>
+                            </span>
+                          </td>
+                        )}
+
+                        <td>
+                          <div className="cat-name-cell-wrap">
+                            {cat.hasSubItems && (
+                              <button
+                                type="button"
+                                className={`sub-toggle-btn ${
+                                  isCatExpanded ? 'expanded' : ''
+                                }`}
+                                aria-expanded={isCatExpanded}
+                                aria-label={`${
+                                  isCatExpanded ? 'Collapse' : 'Expand'
+                                } ${cat.name} (${subCount} ${
+                                  subCount === 1 ? 'item' : 'items'
+                                })`}
+                                title={
+                                  isCatExpanded
+                                    ? 'Collapse sub-assessments'
+                                    : 'Expand sub-assessments'
+                                }
+                                onClick={() =>
+                                  onToggleCategoryItemsExpanded?.(
+                                    cat.id,
+                                    !isCatExpanded,
+                                  )
+                                }
+                              >
+                                <span aria-hidden="true">
+                                  {isCatExpanded ? '▾' : '▸'}
+                                </span>
+                                <span className="tabular">
+                                  {subCount} {subCount === 1 ? 'item' : 'items'}
+                                </span>
+                              </button>
+                            )}
+
+                            <input
+                              type="text"
+                              className="cell-input cat-name-input"
+                              value={cat.name}
+                              disabled={readOnly}
+                              placeholder="Assessment name"
+                              aria-label={`${course.code} category ${idx + 1} name`}
+                              onChange={(e) =>
+                                onUpdateCategory(cat.id, { name: e.target.value })
+                              }
+                            />
+
+                            {cat.hasSubItems && cat.configuredDropLowest > 0 && (
+                              <span className="drop-lowest-badge">
+                                Drop lowest {cat.configuredDropLowest}
+                              </span>
+                            )}
+
+                            {!cat.hasSubItems && !readOnly && (
+                              <button
+                                type="button"
+                                className="split-items-btn"
+                                title={`Split ${
+                                  cat.name || 'category'
+                                } into individual sub-assessments`}
+                                aria-label={`Split items for ${cat.name}`}
+                                onClick={() => onSplitCategory?.(cat.id)}
+                              >
+                                + Split items
+                              </button>
+                            )}
+                          </div>
+                        </td>
+
+                        <td>
+                          <NumericCellInput
+                            value={cat.weight}
+                            placeholder="0.00"
+                            disabled={readOnly}
+                            ariaLabel={`${course.code} ${cat.name} weight percent`}
+                            onCommit={(val) =>
+                              onUpdateCategory(cat.id, { weight: val ?? 0 })
+                            }
+                          />
+                        </td>
+
+                        <td>
+                          {cat.hasSubItems ? (
+                            <div className="computed-grade-cell">
+                              <span
+                                className={`computed-cat-grade tabular ${
+                                  cat.effectiveGrade === null ? 'is-empty' : ''
+                                } ${isRowSimulated ? 'is-simulated' : ''}`.trim()}
+                                aria-label={`${course.code} ${cat.name} computed grade`}
+                                title="Auto-calculated from kept sub-items"
+                              >
+                                {cat.effectiveGrade !== null
+                                  ? formatPercent(cat.effectiveGrade, 2)
+                                  : '—'}
+                              </span>
+                            </div>
+                          ) : (
+                            <NumericCellInput
+                              value={cat.grade}
+                              placeholder={simMode ? 'What-if %' : '—'}
+                              disabled={readOnly}
+                              isSimInput={isRowSimulated || isBlankInSim}
+                              ariaLabel={`${course.code} ${cat.name} grade percent`}
+                              onCommit={(val) => {
+                                if (!readOnly) {
+                                  onUpdateCategory(cat.id, { grade: val });
+                                }
+                              }}
+                            />
+                          )}
+                        </td>
+
+                        <td className="contrib-cell">
+                          {cat.contribution !== null
+                            ? `${cat.contribution.toFixed(2)}%`
+                            : '—'}
+                        </td>
+
+                        {!readOnly && (
+                          <td style={{ textAlign: 'right' }}>
+                            {confirmingCatId === cat.id ? (
+                              <span className="inline-confirm-wrap">
+                                <button
+                                  type="button"
+                                  className="inline-confirm-btn"
+                                  onClick={() => {
+                                    setConfirmingCatId(null);
+                                    onDeleteCategory(cat.id, cat.name);
+                                  }}
+                                  aria-label={`Confirm delete ${cat.name}`}
+                                >
+                                  Delete?
+                                </button>
+                                <button
+                                  type="button"
+                                  className="inline-cancel-btn"
+                                  onClick={() => setConfirmingCatId(null)}
+                                  title="Cancel"
+                                  aria-label={`Cancel delete ${cat.name}`}
+                                >
+                                  ×
+                                </button>
+                              </span>
+                            ) : (
+                              <button
+                                type="button"
+                                className="row-delete-btn"
+                                onClick={() => setConfirmingCatId(cat.id)}
+                                title="Delete assessment row"
+                                aria-label={`Delete ${cat.name}`}
                               >
                                 ×
                               </button>
-                            </span>
-                          ) : (
-                            <button
-                              type="button"
-                              className="row-delete-btn"
-                              onClick={() => setConfirmingCatId(cat.id)}
-                              title="Delete assessment row"
-                              aria-label={`Delete ${cat.name}`}
+                            )}
+                          </td>
+                        )}
+                      </tr>
+
+                      {cat.hasSubItems && isCatExpanded && (
+                        <tr className="sub-items-panel-row">
+                          <td
+                            colSpan={readOnly ? 4 : 6}
+                            className="sub-items-panel-cell"
+                          >
+                            <div
+                              className="sub-items-panel"
+                              role="group"
+                              aria-label={`${course.code} ${cat.name} sub-assessments`}
                             >
-                              ×
-                            </button>
-                          )}
-                        </td>
+                              <div className="sub-panel-header">
+                                <span className="sub-panel-title">
+                                  Sub-assessments (equal weight)
+                                </span>
+
+                                <div className="sub-panel-controls">
+                                  {!readOnly ? (
+                                    <div
+                                      className="drop-lowest-group"
+                                      role="group"
+                                      aria-label={`${cat.name} drop lowest count`}
+                                    >
+                                      <span className="drop-lowest-label">
+                                        Drop lowest:
+                                      </span>
+                                      {dropOptions.map((n) => {
+                                        const isActiveDrop =
+                                          cat.configuredDropLowest === n;
+                                        return (
+                                          <button
+                                            key={n}
+                                            type="button"
+                                            className={`drop-chip tabular ${
+                                              isActiveDrop ? 'active' : ''
+                                            }`}
+                                            aria-pressed={isActiveDrop}
+                                            onClick={() =>
+                                              onSetCategoryDropLowest?.(cat.id, n)
+                                            }
+                                          >
+                                            {n}
+                                          </button>
+                                        );
+                                      })}
+                                    </div>
+                                  ) : cat.configuredDropLowest > 0 ? (
+                                    <span className="sub-panel-readonly-rule">
+                                      Rule: Drop lowest {cat.configuredDropLowest}
+                                    </span>
+                                  ) : null}
+
+                                  {!readOnly && (
+                                    <button
+                                      type="button"
+                                      className="sub-merge-btn"
+                                      title="Merge sub-items back into a single category score"
+                                      aria-label={`Use single score for ${cat.name}`}
+                                      onClick={() =>
+                                        onCollapseCategoryToSingleScore?.(
+                                          cat.id,
+                                          cat.effectiveGrade,
+                                        )
+                                      }
+                                    >
+                                      Single score
+                                    </button>
+                                  )}
+                                </div>
+                              </div>
+
+                              <div className="sub-items-list">
+                                {cat.subItemBreakdowns.map((sub, sIdx) => {
+                                  const isSubSimulated =
+                                    simMode &&
+                                    Boolean(simModifiedSubItemIds?.has(sub.id));
+                                  const isSubBlankInSim =
+                                    simMode && !sub.isGraded;
+                                  const subLabel =
+                                    sub.name || `item ${sIdx + 1}`;
+
+                                  return (
+                                    <div
+                                      key={sub.id}
+                                      className={`sub-item-row ${
+                                        sub.isDropped ? 'is-dropped' : ''
+                                      } ${
+                                        isSubSimulated ? 'is-simulated' : ''
+                                      }`.trim()}
+                                    >
+                                      <div className="sub-item-left">
+                                        {!readOnly && (
+                                          <span className="sub-order-btns">
+                                            <button
+                                              type="button"
+                                              className="mini-arrow-btn"
+                                              disabled={sIdx === 0}
+                                              onClick={() =>
+                                                onReorderSubItem?.(
+                                                  cat.id,
+                                                  sIdx,
+                                                  sIdx - 1,
+                                                )
+                                              }
+                                              title="Move item up"
+                                              aria-label={`Move ${subLabel} up`}
+                                            >
+                                              ↑
+                                            </button>
+                                            <button
+                                              type="button"
+                                              className="mini-arrow-btn"
+                                              disabled={sIdx === subCount - 1}
+                                              onClick={() =>
+                                                onReorderSubItem?.(
+                                                  cat.id,
+                                                  sIdx,
+                                                  sIdx + 1,
+                                                )
+                                              }
+                                              title="Move item down"
+                                              aria-label={`Move ${subLabel} down`}
+                                            >
+                                              ↓
+                                            </button>
+                                          </span>
+                                        )}
+
+                                        <input
+                                          type="text"
+                                          className={`cell-input sub-name-input ${
+                                            sub.isDropped
+                                              ? 'is-dropped-text'
+                                              : ''
+                                          }`.trim()}
+                                          value={sub.name}
+                                          disabled={readOnly}
+                                          placeholder={`Item ${sIdx + 1}`}
+                                          aria-label={`${course.code} ${cat.name} sub-item ${
+                                            sIdx + 1
+                                          } name`}
+                                          onChange={(e) =>
+                                            onUpdateSubItem?.(cat.id, sub.id, {
+                                              name: e.target.value,
+                                            })
+                                          }
+                                        />
+
+                                        {sub.isDropped && (
+                                          <span className="sub-dropped-badge">
+                                            Dropped
+                                          </span>
+                                        )}
+                                      </div>
+
+                                      <div className="sub-item-right">
+                                        <div className="sub-grade-wrap">
+                                          <NumericCellInput
+                                            value={sub.grade}
+                                            placeholder={
+                                              simMode ? 'What-if %' : '—'
+                                            }
+                                            disabled={readOnly}
+                                            isSimInput={
+                                              isSubSimulated || isSubBlankInSim
+                                            }
+                                            ariaLabel={`${course.code} ${cat.name} ${subLabel} grade percent`}
+                                            onCommit={(val) => {
+                                              if (!readOnly) {
+                                                onUpdateSubItem?.(
+                                                  cat.id,
+                                                  sub.id,
+                                                  { grade: val },
+                                                );
+                                              }
+                                            }}
+                                          />
+                                          <span
+                                            className="sub-pct-suffix"
+                                            aria-hidden="true"
+                                          >
+                                            %
+                                          </span>
+                                        </div>
+
+                                        {!readOnly &&
+                                          (confirmingSubId === sub.id ? (
+                                            <span className="inline-confirm-wrap">
+                                              <button
+                                                type="button"
+                                                className="inline-confirm-btn"
+                                                onClick={() => {
+                                                  setConfirmingSubId(null);
+                                                  onDeleteSubItem?.(
+                                                    cat.id,
+                                                    sub.id,
+                                                    subLabel,
+                                                  );
+                                                }}
+                                                aria-label={`Confirm delete ${subLabel}`}
+                                              >
+                                                Delete?
+                                              </button>
+                                              <button
+                                                type="button"
+                                                className="inline-cancel-btn"
+                                                onClick={() =>
+                                                  setConfirmingSubId(null)
+                                                }
+                                                title="Cancel"
+                                                aria-label={`Cancel delete ${subLabel}`}
+                                              >
+                                                ×
+                                              </button>
+                                            </span>
+                                          ) : (
+                                            <button
+                                              type="button"
+                                              className="row-delete-btn sub-delete-btn"
+                                              onClick={() =>
+                                                setConfirmingSubId(sub.id)
+                                              }
+                                              title="Delete sub-item"
+                                              aria-label={`Delete ${subLabel}`}
+                                            >
+                                              ×
+                                            </button>
+                                          ))}
+                                      </div>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+
+                              <div className="sub-panel-footer">
+                                {!readOnly ? (
+                                  <button
+                                    type="button"
+                                    className="add-sub-item-btn"
+                                    disabled={
+                                      subCount >= MAX_SUB_ITEMS_PER_CATEGORY
+                                    }
+                                    onClick={() => onAddSubItem?.(cat.id)}
+                                  >
+                                    + Add Item
+                                  </button>
+                                ) : (
+                                  <span />
+                                )}
+
+                                <span className="sub-panel-summary tabular">
+                                  {cat.gradedSubItemCount === 0
+                                    ? 'No graded items yet (neutral)'
+                                    : cat.effectiveDropCount > 0
+                                      ? `Kept ${cat.keptSubItemCount} of ${
+                                          cat.gradedSubItemCount
+                                        } graded (dropped ${
+                                          cat.effectiveDropCount
+                                        }) · Avg ${formatPercent(
+                                          cat.effectiveGrade,
+                                          2,
+                                        )}`
+                                      : cat.configuredDropLowest > 0 &&
+                                          cat.gradedSubItemCount === 1
+                                        ? `1 graded · Drop lowest ${
+                                            cat.configuredDropLowest
+                                          } activates at 2+ graded · Avg ${formatPercent(
+                                            cat.effectiveGrade,
+                                            2,
+                                          )}`
+                                        : `${
+                                            cat.gradedSubItemCount
+                                          } graded · Avg ${formatPercent(
+                                            cat.effectiveGrade,
+                                            2,
+                                          )}`}
+                                </span>
+                              </div>
+                            </div>
+                          </td>
+                        </tr>
                       )}
-                    </tr>
+                    </Fragment>
                   );
                 })}
               </tbody>

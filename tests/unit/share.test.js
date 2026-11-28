@@ -361,4 +361,49 @@ describe('Share Snapshot Codec & URL Helpers (share.js)', () => {
       '/grade-tracker/?keep=1',
     ]);
   });
+
+  it('round-trips expandable sub-assessments, dropLowest rules, and 0-credit seminars via compressed z1. snapshots (#100, #101)', async () => {
+    const state = createInitialState();
+    state.terms[0].courses[0].units = 0; // 0-credit seminar
+    state.terms[0].courses[1].categories[0] = {
+      id: 'math-1',
+      name: 'Weekly Quizzes',
+      weight: 15,
+      grade: null,
+      dropLowest: 1,
+      itemsExpanded: true,
+      items: [
+        { id: 'mq-1', name: 'Quiz 1', grade: 92 },
+        { id: 'mq-2', name: 'Quiz 2', grade: 58 },
+        { id: 'mq-3', name: 'Quiz 3', grade: 88 },
+        { id: 'mq-4', name: 'Quiz 4', grade: null },
+      ],
+    };
+
+    const token = await encodeShareSnapshot(state);
+    expect(token.startsWith('z1.')).toBe(true);
+
+    const decoded = await decodeShareSnapshot(token);
+    expect(decoded).not.toBeNull();
+    expect(decoded.version).toBe(2);
+    expect(decoded.terms[0].courses[0].units).toBe(0);
+
+    const decodedQuizCat = decoded.terms[0].courses[1].categories[0];
+    expect(decodedQuizCat.dropLowest).toBe(1);
+    expect(decodedQuizCat.items.map((x) => [x.name, x.grade])).toEqual([
+      ['Quiz 1', 92],
+      ['Quiz 2', 58],
+      ['Quiz 3', 88],
+      ['Quiz 4', null],
+    ]);
+
+    const origStats = calculateAllStats(state);
+    const decodedStats = calculateAllStats(decoded);
+    expect(formatGpa(decodedStats.overall.cumulativeGpa, 2)).toBe(
+      formatGpa(origStats.overall.cumulativeGpa, 2),
+    );
+    expect(formatPercent(decodedStats.overall.weightedAverage, 2)).toBe(
+      formatPercent(origStats.overall.weightedAverage, 2),
+    );
+  });
 });
